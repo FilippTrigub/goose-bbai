@@ -38,7 +38,7 @@ fi
 
 
 # --- 2) Variables ---
-REPO="block/goose"
+REPO="FilippTrigub/goose-bbai"
 OUT_FILE="goose"
 GOOSE_BIN_DIR="${GOOSE_BIN_DIR:-"$HOME/.local/bin"}"
 RELEASE="${CANARY:-false}"
