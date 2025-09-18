@@ -1,7 +1,7 @@
 name: Build Goose Release Candidate
 
-on:
-  pull_request:
+# on:
+#   pull_request:
 
 jobs:
   bundle-desktop:

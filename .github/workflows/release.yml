@@ -1,10 +1,10 @@
 # This workflow is main release, needs to be manually tagged & pushed.
-on:
-  push:
-    paths-ignore:
-      - "documentation/**"
-    tags:
-      - "v1.*"
+# on:
+#   push:
+#     paths-ignore:
+#       - "documentation/**"
+#     tags:
+#       - "v1.*"
 
 name: Release
 

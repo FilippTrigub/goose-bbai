@@ -2,12 +2,12 @@
 # This workflow is identical to "release.yml" with these exceptions:
 #  - Triggered by push to main
 #  - Github Release tagged as "canary"
-on:
-  push:
-    paths-ignore:
-      - "documentation/**"
-    branches:
-      - main
+# on:
+#   push:
+#     paths-ignore:
+#       - "documentation/**"
+#     branches:
+#       - main
 
 name: Canary
 

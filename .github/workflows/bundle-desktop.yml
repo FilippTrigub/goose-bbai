@@ -3,32 +3,32 @@
 #  - release.yml
 #  - canary.yml
 #  - pr-comment-bundle-desktop.yml
-on:
-  workflow_call:
-    inputs:
-      version:
-        description: 'Version to set for the build'
-        required: false
-        default: ""
-        type: string
-      signing:
-        description: 'Whether to perform signing and notarization'
-        required: false
-        default: false
-        type: boolean
-      quick_test:
-        description: 'Whether to perform the quick launch test'
-        required: false
-        default: true
-        type: boolean
-      ref:
-        description: 'Git ref to checkout (branch, tag, or SHA). Defaults to main branch if not specified.'
-        required: false
-        type: string
-        default: ''
-    secrets:
-      OSX_CODESIGN_ROLE:
-        required: false
+# on:
+#   workflow_call:
+#     inputs:
+#       version:
+#         description: 'Version to set for the build'
+#         required: false
+#         default: ""
+#         type: string
+#       signing:
+#         description: 'Whether to perform signing and notarization'
+#         required: false
+#         default: false
+#         type: boolean
+#       quick_test:
+#         description: 'Whether to perform the quick launch test'
+#         required: false
+#         default: true
+#         type: boolean
+#       ref:
+#         description: 'Git ref to checkout (branch, tag, or SHA). Defaults to main branch if not specified.'
+#         required: false
+#         type: string
+#         default: ''
+#     secrets:
+#       OSX_CODESIGN_ROLE:
+#         required: false
 
 name: Reusable workflow to bundle desktop app
 

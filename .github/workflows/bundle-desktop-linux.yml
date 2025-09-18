@@ -3,18 +3,18 @@
 #  - release.yml
 #  - canary.yml (when added)
 #  - pr-comment-bundle-desktop.yml (when added)
-on:
-  workflow_call:
-    inputs:
-      version:
-        description: 'Version to set for the build'
-        required: false
-        default: ""
-        type: string
-      ref:
-        type: string
-        required: false
-        default: ''
+# on:
+#   workflow_call:
+#     inputs:
+#       version:
+#         description: 'Version to set for the build'
+#         required: false
+#         default: ""
+#         type: string
+#       ref:
+#         type: string
+#         required: false
+#         default: ''
 
 name: "Bundle Desktop (Linux)"
 

@@ -1,13 +1,13 @@
 # This workflow is triggered by a comment on PR with the text ".build-cli"
-on:
-  issue_comment:
-    types: [created]
-  workflow_dispatch:
-    inputs:
-      pr_number:
-        description: 'PR number to comment on'
-        required: true
-        type: string
+# on:
+#   issue_comment:
+#     types: [created]
+#   workflow_dispatch:
+#     inputs:
+#       pr_number:
+#         description: 'PR number to comment on'
+#         required: true
+#         type: string
 
 # permissions needed for reacting to IssueOps commands on PRs
 permissions:
