@@ -690,7 +690,11 @@ enum Command {
 #[derive(Subcommand, Debug)]
 enum AuthCommand {
     #[command(about = "Start OAuth2 login flow (PKCE)")]
-    Login,
+    Login {
+        /// Use manual mode (paste the redirected URL)
+        #[arg(long, default_value_t = false)]
+        manual: bool,
+    },
     #[command(about = "Show authentication status")]
     Status,
     #[command(about = "Remove local credentials")]
@@ -754,7 +758,9 @@ pub async fn cli() -> Result<()> {
     match cli.command {
         Some(Command::Auth { command }) => {
             match command {
-                AuthCommand::Login => auth::login().await?,
+                AuthCommand::Login { manual } => {
+                    if manual { auth::login_manual_only().await?; } else { auth::login_interactive().await?; }
+                }
                 AuthCommand::Status => auth::status().await?,
                 AuthCommand::Logout => auth::logout().await?,
             }

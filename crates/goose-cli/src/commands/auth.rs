@@ -63,12 +63,23 @@ pub async fn ensure_authenticated() -> Result<()> {
             }
             // Prompt user before opening the browser
             println!("Please log in");
-            // Wait for Enter only if running interactively
+            // Simple interactive choice between automatic and manual modes
             if io::stdin().is_terminal() {
                 let _ = io::stdout().flush();
                 let mut _buf = String::new();
                 let _ = io::stdin().read_line(&mut _buf);
+
+                // Ask for mode
+                print!("Select authentication mode: [a]utomatic (callback) / [m]anual (paste URL) [a]: ");
+                let _ = io::stdout().flush();
+                let mut choice = String::new();
+                let _ = io::stdin().read_line(&mut choice);
+                let choice = choice.trim().to_lowercase();
+                if choice.starts_with('m') {
+                    return login_manual_only().await;
+                }
             }
+            // Default to automatic (with fallback to manual if needed)
             login().await
         }
     }
@@ -280,6 +291,163 @@ pub async fn login() -> Result<()> {
         std::env::set_var("GITHUB_ACCESS_TOKEN", access_token.to_string());
     }
 
+    println!("Login successful.");
+    Ok(())
+}
+
+// Explicit interactive login helper for `goose auth login` without flags
+pub async fn login_interactive() -> Result<()> {
+    if io::stdin().is_terminal() {
+        println!("Select authentication mode:");
+        println!("  1) Automatic (callback server)");
+        println!("  2) Manual (paste redirected URL)");
+        print!("Enter choice [1]: ");
+        let _ = io::stdout().flush();
+        let mut choice = String::new();
+        let _ = io::stdin().read_line(&mut choice);
+        let c = choice.trim();
+        if c == "2" || c.eq_ignore_ascii_case("m") {
+            return login_manual_only().await;
+        }
+    }
+    // Default automatic
+    login().await
+}
+
+pub async fn login_manual_only() -> Result<()> {
+    let client_id = std::env::var("GOOSE_GITHUB_CLIENT_ID")
+        .map_err(|_| anyhow!("GOOSE_GITHUB_CLIENT_ID is required for GitHub OAuth"))?;
+    let redirect_url = std::env::var("GOOSE_AUTH_REDIRECT_URL")
+        .map_err(|_| anyhow!("GOOSE_AUTH_REDIRECT_URL must be set to a stable HTTPS callback URL"))?;
+
+    let scopes = std::env::var("GOOSE_GITHUB_SCOPES").unwrap_or_else(|_| DEFAULT_SCOPES.to_string());
+    let client_secret = std::env::var("GOOSE_GITHUB_CLIENT_SECRET").ok();
+
+    // PKCE S256
+    let state = random_url_safe(24);
+    let code_verifier = random_url_safe(64);
+    let digest = Sha256::digest(code_verifier.as_bytes());
+    let code_challenge = URL_SAFE_NO_PAD.encode(digest);
+
+    let mut auth_url = Url::parse("https://github.com/login/oauth/authorize")?;
+    {
+        let mut qp = auth_url.query_pairs_mut();
+        qp.append_pair("response_type", "code");
+        qp.append_pair("client_id", &client_id);
+        qp.append_pair("redirect_uri", &redirect_url);
+        qp.append_pair("scope", &scopes);
+        qp.append_pair("state", &state);
+        qp.append_pair("code_challenge", &code_challenge);
+        qp.append_pair("code_challenge_method", "S256");
+    }
+
+    println!("\nManual authentication selected. Open this URL:\n  {}\n", auth_url);
+    let no_browser = std::env::var("GOOSE_NO_BROWSER").unwrap_or_default() == "1";
+    if !no_browser {
+        let _ = webbrowser::open(auth_url.as_str());
+    }
+    let (code, returned_state) = manual_oauth_input(&state).await?;
+    if returned_state != state {
+        return Err(anyhow!("State mismatch in OAuth callback (manual)"));
+    }
+
+    // Exchange token (duplicate of above logic for clarity)
+    let mut form: Vec<(&str, &str)> = Vec::new();
+    form.push(("client_id", &client_id));
+    form.push(("redirect_uri", &redirect_url));
+    form.push(("grant_type", "authorization_code"));
+    form.push(("code", &code));
+    form.push(("code_verifier", &code_verifier));
+    if let Some(ref secret) = client_secret {
+        form.push(("client_secret", secret));
+    }
+
+    let mut args: Vec<String> = vec![
+        "-s".into(),
+        "-X".into(),
+        "POST".into(),
+        "-H".into(),
+        "Accept: application/json".into(),
+        "-H".into(),
+        "Content-Type: application/x-www-form-urlencoded".into(),
+        "https://github.com/login/oauth/access_token".into(),
+    ];
+    for (k, v) in form.iter() {
+        args.push("--data-urlencode".into());
+        args.push(format!("{}={}", k, v));
+    }
+
+    let output = Command::new("curl").args(&args).output();
+    let output = match output {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).to_string(),
+        Ok(o) => {
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            return Err(anyhow!("Token exchange failed: {}", stderr));
+        }
+        Err(e) => return Err(anyhow!("Failed to run curl: {}", e)),
+    };
+
+    let json: Value = match serde_json::from_str(&output) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[oauth-debug] Raw token response (non-JSON): {}", output);
+            return Err(anyhow!("Failed to parse token response as JSON: {}", e));
+        }
+    };
+
+    let access_token = match json.get("access_token").and_then(|v| v.as_str()) {
+        Some(tok) => tok,
+        None => {
+            let mut redacted = json.clone();
+            if let Some(obj) = redacted.as_object_mut() {
+                if obj.contains_key("access_token") {
+                    obj.insert("access_token".to_string(), Value::String("<redacted>".to_string()));
+                }
+                if obj.contains_key("refresh_token") {
+                    obj.insert("refresh_token".to_string(), Value::String("<redacted>".to_string()));
+                }
+            }
+            eprintln!("[oauth-debug] Token endpoint response (redacted): {}", serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "<unprintable>".into()));
+            eprintln!("[oauth-debug] Used redirect_uri: {}", redirect_url);
+            eprintln!("[oauth-debug] Used scopes: {}", scopes);
+            eprintln!("[oauth-debug] Client ID present: {}", !client_id.is_empty());
+            eprintln!("[oauth-debug] Client secret provided: {}", client_secret.is_some());
+            return Err(anyhow!("No access_token in token response"));
+        }
+    };
+
+    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
+    let config = Config::global();
+    let mut stored = false;
+    if let Err(e) = config.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
+        eprintln!("[oauth-debug] Keyring storage failed: {}", e);
+    } else {
+        println!("Stored token in keyring");
+        stored = true;
+    }
+    if let Some(secs) = expires_in {
+        let expire_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
+        if let Err(e) = config.set_secret(
+            "GITHUB_EXPIRES_AT",
+            Value::String(expire_at.to_rfc3339()),
+        ) {
+            eprintln!("[oauth-debug] Keyring expiry storage failed: {}", e);
+        }
+    }
+    if !stored {
+        let app = choose_app_strategy(APP_STRATEGY.clone())
+            .map_err(|e| anyhow!("goose requires a home dir: {}", e))?;
+        let cfg_path = app.config_dir().join("config.yaml");
+        let sec_path = app.config_dir().join("secrets.yaml");
+        if let Ok(file_cfg) = Config::new_with_file_secrets(&cfg_path, &sec_path) {
+            if let Err(e) = file_cfg.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
+                eprintln!("[oauth-debug] File-based secret storage failed: {}", e);
+            } else {
+                println!("Stored token in file storage");
+            }
+        }
+        std::env::set_var("GITHUB_ACCESS_TOKEN", access_token.to_string());
+    }
     println!("Login successful.");
     Ok(())
 }
