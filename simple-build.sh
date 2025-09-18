@@ -59,6 +59,7 @@ fi
 # Build temporal-service (Go)
 echo "🔧 Building temporal-service for GOOS=linux GOARCH=$GOARCH"
 pushd temporal-service >/dev/null
+dos2unix ./build.sh
 GOOS=linux GOARCH="$GOARCH" ./build.sh
 popd >/dev/null
 mv -f "temporal-service/temporal-service" "$BUILD_DIR/temporal-service" 2>/dev/null || true
