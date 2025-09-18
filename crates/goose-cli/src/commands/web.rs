@@ -158,8 +158,11 @@ pub async fn handle_web(port: u16, host: String, open: bool) -> Result<()> {
     if open {
         // Open browser
         let url = format!("http://{}", addr);
-        if let Err(e) = webbrowser::open(&url) {
-            eprintln!("Failed to open browser: {}", e);
+        let no_browser = std::env::var("GOOSE_NO_BROWSER").unwrap_or_default() == "1";
+        if no_browser {
+            eprintln!("Browser auto-open disabled (GOOSE_NO_BROWSER=1). Open: {}", url);
+        } else if let Err(e) = webbrowser::open(&url) {
+            eprintln!("Failed to open browser: {}\nOpen this URL manually: {}", e, url);
         }
     }
 
