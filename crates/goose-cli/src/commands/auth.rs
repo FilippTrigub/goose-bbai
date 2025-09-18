@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use axum::{extract::Query, routing::get, Router};
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use sha2::{Digest, Sha256};
-use goose::config::{Config, APP_STRATEGY};
+// No server-side persistent storage
 use serde::Deserialize;
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::sync::oneshot;
 use tokio::time::timeout;
 use url::Url;
-use etcetera::{choose_app_strategy, AppStrategy};
+// No disk/config fallback
 use is_terminal::IsTerminal;
 use std::io::{self, Write};
 use url::form_urlencoded;
@@ -38,51 +38,25 @@ pub async fn ensure_authenticated() -> Result<()> {
         return Ok(());
     }
 
-    if let Ok(tok) = std::env::var("GITHUB_ACCESS_TOKEN") {
-        if !tok.trim().is_empty() {    
-            return Ok(());
+    // Always prompt to log in (no persistent storage)
+    println!("Please log in");
+    if io::stdin().is_terminal() {
+        let _ = io::stdout().flush();
+        let mut _buf = String::new();
+        let _ = io::stdin().read_line(&mut _buf);
+
+        // Ask for mode
+        print!("Select authentication mode: [a]utomatic (callback) / [m]anual (paste URL) [a]: ");
+        let _ = io::stdout().flush();
+        let mut choice = String::new();
+        let _ = io::stdin().read_line(&mut choice);
+        let choice = choice.trim().to_lowercase();
+        if choice.starts_with('m') {
+            return login_manual_only().await;
         }
     }
-
-    let config = Config::global();
-    match config.get_secret::<String>("GITHUB_ACCESS_TOKEN") {
-        Ok(token) if !token.trim().is_empty() => Ok(()),
-        _ => {
-            let app = choose_app_strategy(APP_STRATEGY.clone())
-                .map_err(|e| anyhow!("goose requires a home dir: {}", e))?;
-            let cfg_path = app.config_dir().join("config.yaml");
-            let sec_path = app.config_dir().join("secrets.yaml");
-            if let Ok(file_cfg) = Config::new_with_file_secrets(&cfg_path, &sec_path) {
-                if let Ok(tok) = file_cfg.get_secret::<String>("GITHUB_ACCESS_TOKEN") {
-                    if !tok.trim().is_empty() {
-                        // Make available to current process
-                        std::env::set_var("GITHUB_ACCESS_TOKEN", tok);
-                        return Ok(());
-                    }
-                }
-            }
-            // Prompt user before opening the browser
-            println!("Please log in");
-            // Simple interactive choice between automatic and manual modes
-            if io::stdin().is_terminal() {
-                let _ = io::stdout().flush();
-                let mut _buf = String::new();
-                let _ = io::stdin().read_line(&mut _buf);
-
-                // Ask for mode
-                print!("Select authentication mode: [a]utomatic (callback) / [m]anual (paste URL) [a]: ");
-                let _ = io::stdout().flush();
-                let mut choice = String::new();
-                let _ = io::stdin().read_line(&mut choice);
-                let choice = choice.trim().to_lowercase();
-                if choice.starts_with('m') {
-                    return login_manual_only().await;
-                }
-            }
-            // Default to automatic (with fallback to manual if needed)
-            login().await
-        }
-    }
+    // Default to automatic
+    login().await
 }
 
 pub async fn login() -> Result<()> {
@@ -248,50 +222,8 @@ pub async fn login() -> Result<()> {
         }
     };
 
-    // Optional expiry
-    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-
-    // Store token (prefer keyring but gracefully fall back to file-based secrets)
-    let config = Config::global();
-    let mut stored = false;
-    if let Err(e) = config.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
-        eprintln!("[oauth-debug] Keyring storage failed: {}", e);
-    } else {
-        println!("Stored token in keyring");
-        stored = true;
-    }
-
-    if let Some(secs) = expires_in {
-        let expire_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
-        if let Err(e) = config.set_secret(
-            "GITHUB_EXPIRES_AT",
-            Value::String(expire_at.to_rfc3339()),
-        ) {
-            eprintln!("[oauth-debug] Keyring expiry storage failed: {}", e);
-        }
-    }
-
-    if !stored {
-        let app = choose_app_strategy(APP_STRATEGY.clone())
-            .map_err(|e| anyhow!("goose requires a home dir: {}", e))?;
-        let cfg_path = app.config_dir().join("config.yaml");
-        let sec_path = app.config_dir().join("secrets.yaml");
-        if let Ok(file_cfg) = Config::new_with_file_secrets(&cfg_path, &sec_path) {
-            if let Err(e) = file_cfg.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
-                eprintln!("[oauth-debug] File-based secret storage failed: {}", e);
-            } else {
-                println!("Stored token in file storage");
-                // Inform user about future runs
-                eprintln!(
-                    "[oauth-debug] Stored token in secrets.yaml. Set GOOSE_DISABLE_KEYRING=1 for future runs to read from file storage."
-                );
-            }
-        }
-        // Make token usable for current process even if persistence failed
-        std::env::set_var("GITHUB_ACCESS_TOKEN", access_token.to_string());
-    }
-
-    println!("Login successful.");
+    // Do not persist token; just validate successful retrieval
+    println!("Login successful (token validated, not persisted)");
     Ok(())
 }
 
@@ -416,39 +348,8 @@ pub async fn login_manual_only() -> Result<()> {
         }
     };
 
-    let expires_in = json.get("expires_in").and_then(|v| v.as_u64());
-    let config = Config::global();
-    let mut stored = false;
-    if let Err(e) = config.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
-        eprintln!("[oauth-debug] Keyring storage failed: {}", e);
-    } else {
-        println!("Stored token in keyring");
-        stored = true;
-    }
-    if let Some(secs) = expires_in {
-        let expire_at = chrono::Utc::now() + chrono::Duration::seconds(secs as i64);
-        if let Err(e) = config.set_secret(
-            "GITHUB_EXPIRES_AT",
-            Value::String(expire_at.to_rfc3339()),
-        ) {
-            eprintln!("[oauth-debug] Keyring expiry storage failed: {}", e);
-        }
-    }
-    if !stored {
-        let app = choose_app_strategy(APP_STRATEGY.clone())
-            .map_err(|e| anyhow!("goose requires a home dir: {}", e))?;
-        let cfg_path = app.config_dir().join("config.yaml");
-        let sec_path = app.config_dir().join("secrets.yaml");
-        if let Ok(file_cfg) = Config::new_with_file_secrets(&cfg_path, &sec_path) {
-            if let Err(e) = file_cfg.set_secret("GITHUB_ACCESS_TOKEN", Value::String(access_token.to_string())) {
-                eprintln!("[oauth-debug] File-based secret storage failed: {}", e);
-            } else {
-                println!("Stored token in file storage");
-            }
-        }
-        std::env::set_var("GITHUB_ACCESS_TOKEN", access_token.to_string());
-    }
-    println!("Login successful.");
+    // End of manual flow legacy path
+    println!("Login successful");
     Ok(())
 }
 
@@ -517,22 +418,13 @@ async fn manual_oauth_input(expected_state: &str) -> Result<(String, String)> {
 }
 
 pub async fn status() -> Result<()> {
-    let config = Config::global();
-    match config.get_secret::<String>("GITHUB_ACCESS_TOKEN") {
-        Ok(_) => {
-            println!("Authenticated with GitHub (token present)");
-        }
-        Err(_) => {
-            println!("Not authenticated. Run: goose auth login");
-        }
-    }
+    // Force re-login: do not consider any in-memory token
+    println!("Not authenticated. Run: goose auth login");
     Ok(())
 }
 
 pub async fn logout() -> Result<()> {
-    let config = Config::global();
-    let _ = config.delete_secret("GITHUB_ACCESS_TOKEN");
-    let _ = config.delete_secret("GITHUB_EXPIRES_AT");
-    println!("Logged out (local credentials removed)");
+    // No server-side persistent storage; advise user to clear browser cookies
+    println!("Logged out. If you used the browser, clear site cookies to remove that session.");
     Ok(())
 }
