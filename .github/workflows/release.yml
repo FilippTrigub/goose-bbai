@@ -1,10 +1,6 @@
 # This workflow is main release, needs to be manually tagged & pushed.
-on: 
+on:
   workflow_dispatch:
-    tags:
-      description: 'Version tag (e.g. v1.2.3)'
-      required: true
-      type: string
 #   push:
 #     paths-ignore:
 #       - "documentation/**"
@@ -25,10 +21,39 @@ concurrency:
 
 jobs:
   # ------------------------------------
+  # 0) Compute version tag from Cargo.toml
+  # ------------------------------------
+  meta:
+    name: Compute tag
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # pin@v4
+      - id: set_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          ver=$(awk '/^\[workspace.package\]/{f=1;next} /^\[/{f=0} f && /^version =/{gsub(/\"/,"",$3); print $3; exit}' Cargo.toml)
+          if [ -z "${ver}" ]; then
+            # Fallback to first version line
+            ver=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n1)
+          fi
+          if [ -z "${ver}" ]; then
+            echo "Failed to extract version from Cargo.toml" >&2
+            exit 1
+          fi
+          echo "Resolved version: ${ver}"
+          echo "tag=v${ver}" >> "$GITHUB_OUTPUT"
+  # ------------------------------------
   # 1) Build CLI for multiple OS/Arch
   # ------------------------------------
   build-cli:
     uses: ./.github/workflows/build-cli.yml
+    needs: [meta]
+    with:
+      version: ${{ needs.meta.outputs.tag }}
+      ref: ${{ needs.meta.outputs.tag }}
 
   # ------------------------------------
   # 2) Upload Install CLI Script
@@ -96,6 +121,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: [
       build-cli,
+      meta,
       # install-script,
       # bundle-desktop,
       # bundle-desktop-intel,
@@ -132,6 +158,8 @@ jobs:
       - name: Release versioned
         uses: ncipollo/release-action@440c8c1cb0ed28b9f43e4d1d670870f059653174 # pin@v1
         with:
+          tag: ${{ needs.meta.outputs.tag }}
+          commitish: ${{ github.sha }}
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: |
             goose-*.tar.bz2
