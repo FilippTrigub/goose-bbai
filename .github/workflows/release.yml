@@ -2,7 +2,9 @@
 on: 
   workflow_dispatch:
     tags:
-      - "v0.*"
+      description: 'Version tag (e.g. v1.2.3)'
+      required: true
+      type: string
 #   push:
 #     paths-ignore:
 #       - "documentation/**"
