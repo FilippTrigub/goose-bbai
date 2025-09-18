@@ -126,7 +126,7 @@ jobs:
           omitBody: true
           omitPrereleaseDuringUpdate: true
 
-      Create/update the versioned release
+      # Create/update the versioned release
       - name: Release versioned
         uses: ncipollo/release-action@440c8c1cb0ed28b9f43e4d1d670870f059653174 # pin@v1
         with:
