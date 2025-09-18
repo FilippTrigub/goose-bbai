@@ -51,9 +51,6 @@ jobs:
   build-cli:
     uses: ./.github/workflows/build-cli.yml
     needs: [meta]
-    with:
-      version: ${{ needs.meta.outputs.tag }}
-      ref: ${{ needs.meta.outputs.tag }}
 
   # ------------------------------------
   # 2) Upload Install CLI Script
