@@ -1,7 +1,7 @@
 # This workflow is for nightly releases, automatically triggered at midnight US Eastern
 name: Nightly Build
 
-# on:
+on: workflow_dispatch
 #   schedule:
 #     # Run at midnight US Eastern (0500 UTC)
 #     - cron: '0 5 * * *'

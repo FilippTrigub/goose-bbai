@@ -1,7 +1,7 @@
 # This workflow is triggered by a comment on PR with the text ".bundle-intel"
 # It bundles the Intel Desktop App, then creates a PR comment with a link to download the app.
 
-# on:
+on: workflow_dispatch
 #   issue_comment:
 #     types: [created]
 #   workflow_dispatch:

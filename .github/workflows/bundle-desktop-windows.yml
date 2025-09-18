@@ -1,6 +1,6 @@
 name: "Bundle Desktop (Windows)"
 
-# on:
+on: workflow_dispatch
 #  push:    
 #    branches: [ "main" ]
 #  pull_request:

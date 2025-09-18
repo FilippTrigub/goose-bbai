@@ -1,6 +1,6 @@
 name: Daily Test Coverage Finder
 
-# on:
+on: workflow_dispatch
 #   schedule:
 #     # Run daily at 2 AM UTC
 #     - cron: '0 2 * * *'

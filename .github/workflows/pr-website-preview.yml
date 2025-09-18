@@ -1,6 +1,6 @@
 name: Documentation Site Preview
 
-# on:
+on: workflow_dispatch
 #   pull_request:
 #     types:
 #       - opened

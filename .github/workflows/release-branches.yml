@@ -1,6 +1,6 @@
 name: Build Goose Release Candidate
 
-# on:
+on: workflow_dispatch
 #   pull_request:
 
 jobs:
