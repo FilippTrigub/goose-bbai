@@ -1,9 +1,9 @@
 name: Quarantine check
 
-on:
-  pull_request_target:
-    branches:
-      - main
+# on:
+#   pull_request_target:
+#     branches:
+#       - main
 
 permissions:
   pull-requests: write

@@ -1,17 +1,17 @@
 name: Documentation Site Preview
 
-on:
-  pull_request:
-    types:
-      - opened
-      - reopened
-      - synchronize
-      - closed
-    paths:
-      - 'documentation/**'
-  push:
-    branches-ignore:
-      - 'dependabot/**'
+# on:
+#   pull_request:
+#     types:
+#       - opened
+#       - reopened
+#       - synchronize
+#       - closed
+#     paths:
+#       - 'documentation/**'
+#   push:
+#     branches-ignore:
+#       - 'dependabot/**'
 
 concurrency: preview-${{ github.ref }}
 

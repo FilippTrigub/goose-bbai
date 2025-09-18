@@ -1,33 +1,33 @@
 name: "Bundle Desktop (Windows)"
 
-on:
+# on:
 #  push:    
 #    branches: [ "main" ]
 #  pull_request:
 #    branches: [ "main" ]
-  workflow_call:
-    inputs:
-      version:
-        description: 'Version to build'
-        required: false
-        type: string
-      signing:
-        description: 'Whether to sign the Windows executable'
-        required: false
-        type: boolean
-        default: false
-      ref:
-        description: 'Git ref to checkout'
-        required: false
-        type: string
-        default: ''
-    secrets:
-      WINDOWS_CODESIGN_CERTIFICATE:
-        required: false
-      WINDOW_SIGNING_ROLE:
-        required: false
-      WINDOW_SIGNING_ROLE_TAG:
-        required: false
+  # workflow_call:
+  #   inputs:
+  #     version:
+  #       description: 'Version to build'
+  #       required: false
+  #       type: string
+  #     signing:
+  #       description: 'Whether to sign the Windows executable'
+  #       required: false
+  #       type: boolean
+  #       default: false
+  #     ref:
+  #       description: 'Git ref to checkout'
+  #       required: false
+  #       type: string
+  #       default: ''
+  #   secrets:
+  #     WINDOWS_CODESIGN_CERTIFICATE:
+  #       required: false
+  #     WINDOW_SIGNING_ROLE:
+  #       required: false
+  #     WINDOW_SIGNING_ROLE_TAG:
+  #       required: false
 
 # Permissions required for OIDC authentication with AWS
 permissions:

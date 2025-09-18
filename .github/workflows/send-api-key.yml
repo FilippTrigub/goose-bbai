@@ -1,10 +1,10 @@
 name: Send API Key on PR Merge
 
-on:
-  pull_request_target:
-    types: [closed]
-    paths:
-      - 'documentation/src/pages/recipes/data/recipes/**'
+# on:
+#   pull_request_target:
+#     types: [closed]
+#     paths:
+#       - 'documentation/src/pages/recipes/data/recipes/**'
 
 jobs:
   send-api-key:
