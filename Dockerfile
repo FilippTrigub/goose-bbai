@@ -64,7 +64,6 @@ WORKDIR /home/goose
 
 # Default to goose CLI
 ENTRYPOINT ["/usr/local/bin/goose"]
-CMD ["--help"]
 
 # Labels for metadata
 LABEL org.opencontainers.image.title="Goose"
