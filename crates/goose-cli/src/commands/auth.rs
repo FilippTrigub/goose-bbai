@@ -14,6 +14,7 @@ use url::Url;
 use etcetera::{choose_app_strategy, AppStrategy};
 use is_terminal::IsTerminal;
 use std::io::{self, Write};
+use url::form_urlencoded;
 
 const DEFAULT_SCOPES: &str = "read:user user:email";
 
@@ -101,24 +102,25 @@ pub async fn login() -> Result<()> {
         qp.append_pair("code_challenge_method", "S256");
     }
 
-    // Start ephemeral callback server if redirect_url points to our local listener
+    
     let listen_addr = std::env::var("GOOSE_AUTH_LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:8080".to_string());
     let listen_addr: SocketAddr = listen_addr.parse()?;
 
     // Channel to receive code
     let (tx, rx) = oneshot::channel::<(String, String)>();
-    let expected_state = state.clone();
+    let expected_state = std::sync::Arc::new(state.clone());
+    let expected_state_for_route = expected_state.clone();
 
     // Build a tiny router for /oauth_callback
     let app = {
-        let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
+        let tx_arc = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
         Router::new().route(
             "/oauth_callback",
             get(move |Query(q): Query<CallbackQuery>| {
-                let tx = tx.clone();
-                let expected_state = expected_state.clone();
+                let tx = tx_arc.clone();
+                let expected_state = expected_state_for_route.clone();
                 async move {
-                    let body = if q.state == expected_state {
+                    let body = if q.state == expected_state.as_ref().as_str() {
                         if let Some(sender) = tx.lock().await.take() {
                             let _ = sender.send((q.code.clone(), q.state.clone()));
                         }
@@ -135,8 +137,14 @@ pub async fn login() -> Result<()> {
     // Start server with shutdown when we get the code or timeout
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
 
-    // Open browser
-    let _ = webbrowser::open(auth_url.as_str());
+    println!("\nOpen this URL in your browser to continue:\n  {}\n", auth_url);
+    
+    let no_browser = std::env::var("GOOSE_NO_BROWSER").unwrap_or_default() == "1";
+    if !no_browser {
+        if let Err(e) = webbrowser::open(auth_url.as_str()) {
+            eprintln!("[oauth-info] Could not open browser automatically: {}", e);
+        }
+    }
 
     // Start server as a background task and wait for callback (up to 60s)
     let server_task = tokio::spawn(async move {
@@ -149,8 +157,14 @@ pub async fn login() -> Result<()> {
 
     let (code, returned_state) = match result {
         Ok(Ok(pair)) => pair,
-        Ok(Err(_)) => return Err(anyhow!("Authentication failed to capture code")),
-        Err(_) => return Err(anyhow!("Authentication timed out after 60s")),
+        Ok(Err(_)) => {
+            eprintln!("[oauth-info] Did not capture OAuth callback automatically.");
+            manual_oauth_input(expected_state.as_ref()).await?
+        }
+        Err(_) => {
+            eprintln!("[oauth-info] OAuth callback timed out after 60s.");
+            manual_oauth_input(expected_state.as_ref()).await?
+        }
     };
     if returned_state != state {
         return Err(anyhow!("State mismatch in OAuth callback"));
@@ -256,7 +270,6 @@ pub async fn login() -> Result<()> {
                 eprintln!("[oauth-debug] File-based secret storage failed: {}", e);
             } else {
                 println!("Stored token in file storage");
-                stored = true;
                 // Inform user about future runs
                 eprintln!(
                     "[oauth-debug] Stored token in secrets.yaml. Set GOOSE_DISABLE_KEYRING=1 for future runs to read from file storage."
@@ -269,6 +282,70 @@ pub async fn login() -> Result<()> {
 
     println!("Login successful.");
     Ok(())
+}
+
+async fn manual_oauth_input(expected_state: &str) -> Result<(String, String)> {
+    if !io::stdin().is_terminal() {
+        return Err(anyhow!(
+            "No interactive input available. Re-run with a TTY or set GOOSE_NO_BROWSER=1 and paste the code when prompted."
+        ));
+    }
+
+    println!("\nManual OAuth fallback");
+    println!("1) Open the printed URL in your browser");
+    println!("2) After authorizing, copy either:");
+    println!("   - the full redirected URL you land on, OR");
+    println!("   - just the value of the 'code' parameter");
+    print!("Paste here and press Enter: ");
+    let _ = io::stdout().flush();
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let input = input.trim();
+
+    if let Ok(url) = Url::parse(input) {
+        let mut code: Option<String> = None;
+        let mut state: Option<String> = None;
+        for (k, v) in url.query_pairs() {
+            if k == "code" {
+                code = Some(v.to_string());
+            } else if k == "state" {
+                state = Some(v.to_string());
+            }
+        }
+        if let Some(code) = code {
+            let returned_state = state.unwrap_or_else(|| expected_state.to_string());
+            if returned_state != expected_state {
+                return Err(anyhow!("State mismatch in pasted URL"));
+            }
+            return Ok((code, returned_state));
+        }
+    }
+
+    if input.contains('=') && input.contains('&') {
+        let mut code: Option<String> = None;
+        let mut state: Option<String> = None;
+        for (k, v) in form_urlencoded::parse(input.as_bytes()) {
+            if k == "code" {
+                code = Some(v.into_owned());
+            } else if k == "state" {
+                state = Some(v.into_owned());
+            }
+        }
+        if let Some(code) = code {
+            let returned_state = state.unwrap_or_else(|| expected_state.to_string());
+            if returned_state != expected_state {
+                return Err(anyhow!("State mismatch in pasted parameters"));
+            }
+            return Ok((code, returned_state));
+        }
+    }
+
+    if !input.is_empty() {
+        return Ok((input.to_string(), expected_state.to_string()));
+    }
+
+    Err(anyhow!("No code provided"))
 }
 
 pub async fn status() -> Result<()> {
