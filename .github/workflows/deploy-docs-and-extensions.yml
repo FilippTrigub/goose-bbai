@@ -1,6 +1,6 @@
 name: Deploy Documentation
 
-# on:
+on: workflow_dispatch
 #   push:
 #     branches:
 #       - main

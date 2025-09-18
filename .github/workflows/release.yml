@@ -1,5 +1,5 @@
 # This workflow is main release, needs to be manually tagged & pushed.
-# on:
+on: workflow_dispatch
 #   push:
 #     paths-ignore:
 #       - "documentation/**"

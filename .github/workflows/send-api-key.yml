@@ -1,6 +1,6 @@
 name: Send API Key on PR Merge
 
-# on:
+on: workflow_dispatch
 #   pull_request_target:
 #     types: [closed]
 #     paths:
