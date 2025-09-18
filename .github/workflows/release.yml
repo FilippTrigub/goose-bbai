@@ -1,10 +1,13 @@
 # This workflow is main release, needs to be manually tagged & pushed.
-on: workflow_dispatch
+on: 
+  workflow_dispatch:
+    tags:
+      - "v0.*"
 #   push:
 #     paths-ignore:
 #       - "documentation/**"
-#     tags:
-#       - "v1.*"
+    # tags:
+    #   - "v1.*"
 
 name: Release
 
@@ -105,10 +108,12 @@ jobs:
         with:
           merge-multiple: true
 
-      # Create/update the versioned release
-      - name: Release versioned
+      # Create/update the stable release
+      - name: Release stable
         uses: ncipollo/release-action@440c8c1cb0ed28b9f43e4d1d670870f059653174 # pin@v1
         with:
+          tag: stable
+          name: Stable
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: |
             goose-*.tar.bz2
@@ -121,12 +126,10 @@ jobs:
           omitBody: true
           omitPrereleaseDuringUpdate: true
 
-      # Create/update the stable release
-      - name: Release stable
+      Create/update the versioned release
+      - name: Release versioned
         uses: ncipollo/release-action@440c8c1cb0ed28b9f43e4d1d670870f059653174 # pin@v1
         with:
-          tag: stable
-          name: Stable
           token: ${{ secrets.GITHUB_TOKEN }}
           artifacts: |
             goose-*.tar.bz2
