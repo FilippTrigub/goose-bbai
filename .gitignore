@@ -33,7 +33,12 @@ ui/desktop/src/bin/goose_llm.dll
 
 # Claude
 .claude
-.agents
+
+# VS Code
+.vscode
+
+# Agentic
+.artifacts
 
 debug_*.txt
 

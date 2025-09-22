@@ -17,3 +17,4 @@ pub static APP_STRATEGY: Lazy<AppStrategyArgs> = Lazy::new(|| AppStrategyArgs {
     author: "Block".to_string(),
     app_name: "goose".to_string(),
 });
+pub mod database;

@@ -200,7 +200,7 @@ pub async fn login() -> Result<()> {
     };
 
     // Log redacted response for debugging when access_token is missing
-    let access_token = match json.get("access_token").and_then(|v| v.as_str()) {
+    let _access_token = match json.get("access_token").and_then(|v| v.as_str()) {
         Some(tok) => tok,
         None => {
             // Redact sensitive fields if present, print the rest
@@ -327,7 +327,7 @@ pub async fn login_manual_only() -> Result<()> {
         }
     };
 
-    let access_token = match json.get("access_token").and_then(|v| v.as_str()) {
+    let _access_token = match json.get("access_token").and_then(|v| v.as_str()) {
         Some(tok) => tok,
         None => {
             let mut redacted = json.clone();
