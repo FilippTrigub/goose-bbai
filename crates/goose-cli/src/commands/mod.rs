@@ -10,3 +10,4 @@ pub mod schedule;
 pub mod session;
 pub mod update;
 pub mod web;
+pub mod api_server;

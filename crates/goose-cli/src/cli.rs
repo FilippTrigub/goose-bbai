@@ -12,6 +12,7 @@ use crate::commands::mcp::run_server;
 use crate::commands::project::{handle_project_default, handle_projects_interactive};
 use crate::commands::recipe::{handle_deeplink, handle_list, handle_validate};
 // Import the new handlers from commands::schedule
+use crate::commands::api_server;
 use crate::commands::schedule::{
     handle_schedule_add, handle_schedule_cron_help, handle_schedule_list, handle_schedule_remove,
     handle_schedule_run_now, handle_schedule_services_status, handle_schedule_services_stop,
@@ -685,6 +686,33 @@ enum Command {
         #[arg(long, help = "Open browser automatically when server starts")]
         open: bool,
     },
+    /// Start a REST API server
+    #[command(about = "Start a REST API server with streaming responses")]
+    ApiServer {
+        /// Port to run the API server on
+        #[arg(
+            short,
+            long,
+            default_value = "3000",
+            help = "Port to run the API server on"
+        )]
+        port: u16,
+
+        /// Host to bind the API server to
+        #[arg(
+            long,
+            default_value = "127.0.0.1",
+            help = "Host to bind the API server to"
+        )]
+        host: String,
+
+        /// MongoDB connection URL
+        #[arg(
+            long,
+            help = "MongoDB connection URL (default: mongodb://localhost:27017)"
+        )]
+        database_url: Option<String>,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -746,6 +774,7 @@ pub async fn cli() -> Result<()> {
         Some(Command::Bench { .. }) => "bench",
         Some(Command::Recipe { .. }) => "recipe",
         Some(Command::Web { .. }) => "web",
+        Some(Command::ApiServer { .. }) => "api-server",
         None => "default_session",
     };
 
@@ -759,7 +788,11 @@ pub async fn cli() -> Result<()> {
         Some(Command::Auth { command }) => {
             match command {
                 AuthCommand::Login { manual } => {
-                    if manual { auth::login_manual_only().await?; } else { auth::login_interactive().await?; }
+                    if manual {
+                        auth::login_manual_only().await?;
+                    } else {
+                        auth::login_interactive().await?;
+                    }
                 }
                 AuthCommand::Status => auth::status().await?,
                 AuthCommand::Logout => auth::logout().await?,
@@ -1197,6 +1230,15 @@ pub async fn cli() -> Result<()> {
         Some(Command::Web { port, host, open }) => {
             auth::ensure_authenticated().await?;
             crate::commands::web::handle_web(port, host, open).await?;
+            return Ok(());
+        }
+        Some(Command::ApiServer {
+            port,
+            host,
+            database_url,
+        }) => {
+            auth::ensure_authenticated().await?;
+            api_server::handle_api_server(port, host, database_url).await?;
             return Ok(());
         }
         None => {

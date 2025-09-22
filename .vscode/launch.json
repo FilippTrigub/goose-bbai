@@ -1,19 +1,56 @@
 {
-    "version": "0.2.0",
-    "configurations": [
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug Goose API Server",
+      "program": "${workspaceFolder}/target/debug/goose",
+      "args": [
+        "api-server",
+        "--port",
+        "3001",
+        "--database-url",
+        "${env:MONGODB_URL_DEV}"
+      ],
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false,
+      "envFile": "${workspaceFolder}/.env",
+      "environment": [
         {
-            "name": "Jxs Launch",
-            "type": "cppvsdbg",
-            "request": "launch",
-            "program": "${workspaceFolder}/target/debug/hgs.exe",
-            "args": [
-                //"no_launcher"
-            ],
-            "stopAtEntry": false,
-            "cwd": "${workspaceFolder}/hgs",
-            "environment": [],
-            "console": "integratedTerminal",
-            "preLaunchTask": "build hgs"
+          "name": "RUST_LOG",
+          "value": "debug,goose_cli::commands::api_server=trace"
+        },
+        {
+          "name": "RUST_BACKTRACE",
+          "value": "full"
+        },
+        {
+          "name": "GOOSE_AUTH_BYPASS",
+          "value": "1"
         }
-    ]
+      ],
+      "externalConsole": false
+    },
+    {
+      "type": "lldb",
+      "request": "attach",
+      "name": "Attach to Running Server",
+      "pid": "${command:pickProcess}"
+    }
+  ],
+  "inputs": [
+    {
+      "id": "port",
+      "description": "Server port",
+      "default": "3001",
+      "type": "promptString"
+    },
+    {
+      "id": "mongoUrl",
+      "description": "MongoDB URL",
+      "default": "mongodb://localhost:27017",
+      "type": "promptString"
+    }
+  ]
 }
