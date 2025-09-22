@@ -41,7 +41,7 @@ etcetera = "0.8.0"
 rand = "0.8.5"
 rustyline = "15.0.0"
 tracing = "0.1"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
 tracing-appender = "0.2"
 once_cell = "1.20.2"
@@ -63,6 +63,9 @@ anstream = "0.6.18"
 url = "2.5.7"
 sha2 = "0.10"
 urlencoding = "2.1.3"
+mongodb = "3.0"
+bson = { version = "2.0", features = ["chrono-0_4"] }
+async-stream = "0.3"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winapi = { version = "0.3", features = ["wincred"] }
@@ -73,3 +76,4 @@ tempfile = "3"
 temp-env = { version = "0.3.6", features = ["async_closure"] }
 test-case = "3.3"
 tokio = { version = "1.43", features = ["rt", "macros"] }
+async-stream = "0.3"
