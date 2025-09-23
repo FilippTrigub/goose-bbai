@@ -63,10 +63,4 @@ USER goose
 WORKDIR /home/goose
 
 # Default to goose CLI
-ENTRYPOINT ["/usr/local/bin/goose"]
-
-# Labels for metadata
-LABEL org.opencontainers.image.title="Goose"
-LABEL org.opencontainers.image.description="Goose CLI"
-LABEL org.opencontainers.image.vendor="Block"
-LABEL org.opencontainers.image.source="https://github.com/block/goose"
+ENTRYPOINT ["/usr/local/bin/goose", "api-server", "--port", "3001", "--host", "0.0.0.0"]
