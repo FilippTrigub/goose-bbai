@@ -7,14 +7,14 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
     },
-    routing::{delete, get, post},
+    routing::{get, post},
     Router,
 };
 use futures::{stream, StreamExt};
 use goose::agents::{Agent, AgentEvent};
 use goose::conversation::message::Message as GooseMessage;
 use goose::conversation::Conversation;
-use goose::providers::base::{MessageStream, Provider};
+use goose::providers::base::Provider;
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::SystemTime};
@@ -27,18 +27,6 @@ struct AppState {
     agent: Arc<Agent>,
     provider: Arc<dyn Provider>, // Direct provider access for token streaming
     db: Arc<DatabaseManager>,
-}
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: String,
-    timestamp: String,
-    version: String,
-    database_connected: bool,
-    storage_type: String,
-    mongodb_url: String,
-    mongodb_database: String,
-    streaming_modes: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -88,9 +76,6 @@ pub async fn handle_api_server(
     database_url: Option<String>,
 ) -> Result<()> {
     info!("🚀 Starting Goose API Server initialization...");
-
-    // Setup logging
-    crate::logging::setup_logging(Some("goose-api"), None)?;
 
     // Log environment variables for debugging
     debug!("🔍 Environment Variables:");
@@ -220,6 +205,21 @@ pub async fn handle_api_server(
     info!("🌐 Listening on: http://{}", addr);
     info!("📊 Database: {} ({})", db_name, db_url);
     info!("🔧 Storage: MongoDB-only (no local fallback)");
+    info!("OPENAI_API_KEY: {}", {
+        std::env::var("OPENAI_API_KEY").unwrap_or_else(|_| "unset".to_string())
+    });
+    info!("BLACKBOX_API_KEY: {}", {
+        std::env::var("BLACKBOX_API_KEY").unwrap_or_else(|_| "unset".to_string())
+    });
+    info!("OPENAI_HOST: {}", {
+        std::env::var("OPENAI_HOST").unwrap_or_else(|_| "unset".to_string())
+    });
+    info!("OPENAI_BASE_PATH: {}", {
+        std::env::var("OPENAI_BASE_PATH").unwrap_or_else(|_| "unset".to_string())
+    });
+    info!("GOOSE_MODEL: {}", {
+        std::env::var("GOOSE_MODEL").unwrap_or_else(|_| "unset".to_string())
+    });
     info!("📡 Endpoints: 8 REST API endpoints available");
     info!("🌊 Streaming modes: Agent-level (/messages) + Provider-level (/stream)");
 
@@ -592,28 +592,6 @@ async fn stream_direct_from_provider(
         session_id
     );
     debug!("📝 Message content: {}", request.message);
-
-    // Check if provider supports streaming
-    if !state.provider.supports_streaming() {
-        warn!("⚠️ Provider does not support streaming, falling back to agent-level");
-        let error_data = serde_json::to_string(&TokenStreamEvent {
-            event_type: "error".to_string(),
-            content: "Provider does not support token streaming".to_string(),
-            accumulated: "".to_string(),
-            timestamp: SystemTime::now()
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-            session_id: session_id.clone(),
-        })
-        .unwrap();
-
-        return Sse::new(stream::once(async move {
-            Ok::<_, Infallible>(Event::default().data(error_data))
-        }))
-        .keep_alive(KeepAlive::default())
-        .into_response();
-    }
 
     // Verify session exists in MongoDB
     match state.db.get_session(&session_id).await {
