@@ -107,7 +107,7 @@ fn setup_logging_internal(
 
             // Create console logging layer for development - INFO and above only
             let console_layer = fmt::layer()
-                .with_writer(std::io::stderr)
+                .with_writer(std::io::stdout)
                 .with_target(true)
                 .with_level(true)
                 .with_ansi(true)
@@ -125,16 +125,18 @@ fn setup_logging_internal(
                     .add_directive("mcp_client=debug".parse().unwrap())
                     // Set goose module to DEBUG
                     .add_directive("goose=debug".parse().unwrap())
-                    // Set goose-cli to INFO
-                    .add_directive("goose_cli=info".parse().unwrap())
-                    // Set everything else to WARN
-                    .add_directive(LevelFilter::WARN.into())
+                    // Set goose-cli to DEBUG
+                    .add_directive("goose_cli=debug".parse().unwrap())
+                    // Set goose-cli to DEBUG
+                    .add_directive("goose_api=debug".parse().unwrap())
+                    // Set everything else to DEBUG
+                    .add_directive(LevelFilter::DEBUG.into())
             });
 
             // Start building the subscriber
             let mut layers = vec![
                 file_layer.with_filter(env_filter).boxed(),
-                console_layer.with_filter(LevelFilter::WARN).boxed(),
+                console_layer.with_filter(LevelFilter::DEBUG).boxed(),
             ];
 
             // Only add ErrorCaptureLayer if not in test mode
