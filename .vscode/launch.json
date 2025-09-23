@@ -9,18 +9,10 @@
       "args": [
         "api-server",
         "--port",
-        "3001",
-        "--database-url",
-        "${env:MONGODB_URL_DEV}"
+        "3001"
       ],
       "cwd": "${workspaceFolder}",
-      "stopOnEntry": false,
-      "envFile": "${workspaceFolder}/.env",
       "environment": [
-        {
-          "name": "RUST_LOG",
-          "value": "debug,goose_cli::commands::api_server=trace"
-        },
         {
           "name": "RUST_BACKTRACE",
           "value": "full"
@@ -28,8 +20,56 @@
         {
           "name": "GOOSE_AUTH_BYPASS",
           "value": "1"
+        },
+        {
+          "name": "GOOSE_PROVIDER",
+          "value": "openai"
+        },
+        {
+          "name": "RUST_LOG",
+          "value": "debug,goose_cli::commands::api_server=trace"
+        },
+        {
+          "name": "RA_LOG",
+          "value": "DEBUG"
         }
       ],
+      "stopOnEntry": false,
+      "envFile": "${workspaceFolder}/.env",
+      "console": "integratedTerminal",
+      "internalConsoleOptions": "openOnSessionStart"
+    },
+    {
+      "type": "lldb",
+      "request": "launch",
+      "name": "Debug API Server (Console Only)",
+      "program": "${workspaceFolder}/target/debug/goose",
+      "args": [
+        "api-server",
+        "--port",
+        "3001",
+      ],
+      "cwd": "${workspaceFolder}",
+      "environment": [
+        {
+          "name": "RUST_BACKTRACE",
+          "value": "1"
+        },
+        {
+          "name": "GOOSE_AUTH_BYPASS",
+          "value": "1"
+        },
+        {
+          "name": "GOOSE_PROVIDER",
+          "value": "openai"
+        },
+        {
+          "name": "RUST_LOG",
+          "value": "debug,goose_cli::commands::api_server=debug"
+        }
+      ],
+      "stopOnEntry": false,
+      "envFile": "${workspaceFolder}/.env",
       "externalConsole": false
     },
     {
