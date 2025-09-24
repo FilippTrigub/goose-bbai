@@ -43,6 +43,8 @@ RUN apt-get update && \
     libxcb1 \
     curl \
     git \
+    nodejs \
+    npm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
@@ -53,6 +55,10 @@ COPY --from=builder /build/target/release/goose /usr/local/bin/goose
 RUN useradd -m -u 1000 -s /bin/bash goose && \
     mkdir -p /home/goose/.config/goose && \
     chown -R goose:goose /home/goose
+
+# Copy config
+COPY assets/config.yaml /home/goose/.config/goose/config.yaml
+RUN chmod u-w /home/goose/.config/goose/config.yaml
 
 # Set up environment
 ENV PATH="/usr/local/bin:${PATH}"

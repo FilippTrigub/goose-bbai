@@ -1,0 +1,23 @@
+extensions:
+  context7:
+    name: "context7"
+    cmd: "npx"
+    args:
+      [
+        "-y",
+        "@smithery/cli@latest",
+        "run",
+        "@upstash/context7-mcp",
+        "--key",
+        "1148243e-4547-4108-95ef-52cb0b3526c7",
+      ]
+    enabled: true
+    timeout: 10
+    type: stdio
+  github:
+    name: GitHub
+    cmd: "npx"
+    args: ["-y", "@modelcontextprotocol/server-github"]
+    enabled: true
+    timeout: 10
+    type: stdio
