@@ -85,12 +85,6 @@
       "description": "Server port",
       "default": "3001",
       "type": "promptString"
-    },
-    {
-      "id": "mongoUrl",
-      "description": "MongoDB URL",
-      "default": "mongodb://localhost:27017",
-      "type": "promptString"
     }
   ]
 }
