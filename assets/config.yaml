@@ -21,3 +21,17 @@ extensions:
     enabled: true
     timeout: 10
     type: stdio
+  filesystem:
+      name: Filesystem
+      cmd: "npx"
+      args: ["-y", "@modelcontextprotocol/server-filesystem", "~/"]
+      enabled: true
+      timeout: 10
+      type: stdio
+  superShell:
+    name: super shell
+    cmd: "npx"
+    args: ["-y", "super-shell-mcp"]
+    enabled: true
+    timeout: 10
+    type: stdio
