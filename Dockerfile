@@ -43,10 +43,10 @@ RUN apt-get update && \
     libxcb1 \
     curl \
     git \
-    nodejs \
-    npm \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
+
+RUN apt install -y ca-certificates curl && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - && apt install -y nodejs
 
 # Copy binary from builder
 COPY --from=builder /build/target/release/goose /usr/local/bin/goose
@@ -65,7 +65,7 @@ ENV PATH="/usr/local/bin:${PATH}"
 ENV HOME="/home/goose"
 
 # Switch to non-root user
-USER goose
+# USER goose
 WORKDIR /home/goose
 
 # Default to goose CLI
