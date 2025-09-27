@@ -7,7 +7,7 @@ use axum::{
         sse::{Event, KeepAlive, Sse},
         IntoResponse, Json,
     },
-    routing::{get, post},
+    routing::{delete, get, post, put},
     Router,
 };
 use futures::{stream, StreamExt};
@@ -15,9 +15,11 @@ use goose::agents::{Agent, AgentEvent};
 use goose::conversation::message::Message as GooseMessage;
 use goose::conversation::Conversation;
 use goose::providers::base::Provider;
+use goose::config::{ExtensionConfigManager, ExtensionEntry};
+use goose::agents::ExtensionConfig;
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::SystemTime};
+use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::SystemTime, collections::HashMap};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
 
@@ -68,6 +70,115 @@ struct TokenStreamEvent {
     accumulated: String,
     timestamp: u64,
     session_id: String,
+}
+
+#[derive(Serialize)]
+struct SessionMessage {
+    role: String,
+    content: String,
+    timestamp: Option<u64>,
+    message_index: usize,
+}
+
+#[derive(Serialize)]
+struct SessionMessagesResponse {
+    session_id: String,
+    messages: Vec<SessionMessage>,
+    total_count: usize,
+}
+
+// Extension management structures
+#[derive(Serialize)]
+struct ExtensionInfo {
+    name: String,
+    display_name: Option<String>,
+    #[serde(rename = "type")]
+    extension_type: String,
+    enabled: bool,
+    timeout: Option<u64>,
+    // For stdio extensions
+    cmd: Option<String>,
+    args: Option<Vec<String>>,
+    // For built-in extensions
+    bundled: Option<bool>,
+    description: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ExtensionListResponse {
+    extensions: Vec<ExtensionInfo>,
+    total_count: usize,
+}
+
+#[derive(Deserialize)]
+struct ExtensionCreateRequest {
+    name: String,
+    display_name: Option<String>,
+    #[serde(rename = "type")]
+    extension_type: String, // "stdio", "builtin", "sse", "streamable_http", "frontend", "inline_python"
+    timeout: Option<u64>,
+    // For stdio extensions
+    cmd: Option<String>,
+    args: Option<Vec<String>>,
+    // For built-in extensions
+    bundled: Option<bool>,
+    description: Option<String>,
+    // Environment variables
+    envs: Option<HashMap<String, String>>,
+    env_keys: Option<Vec<String>>,
+    // For remote extensions
+    uri: Option<String>,
+    headers: Option<HashMap<String, String>>,
+    // For inline python extensions
+    python_code: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ExtensionToggleRequest {
+    enabled: bool,
+}
+
+// Settings management structures
+#[derive(Serialize, Clone)]
+struct SettingValidation {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    min: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allowed_values: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pattern: Option<String>,
+}
+
+#[derive(Serialize)]
+struct SettingInfo {
+    key: String,
+    value: Option<serde_json::Value>,
+    default_value: Option<serde_json::Value>,
+    description: String,
+    value_type: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation: Option<SettingValidation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    env_override: Option<String>,
+    restart_required: bool,
+}
+
+#[derive(Serialize)]
+struct SettingsListResponse {
+    settings: Vec<SettingInfo>,
+    total_count: usize,
+}
+
+#[derive(Deserialize)]
+struct SettingUpdateRequest {
+    value: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct BulkSettingsUpdateRequest {
+    settings: HashMap<String, serde_json::Value>,
 }
 
 pub async fn handle_api_server(
@@ -174,7 +285,7 @@ pub async fn handle_api_server(
         db: Arc::new(db_manager),
     };
 
-    // Build router with both streaming endpoints
+    // Build router with extension management endpoints
     info!("🌍 Setting up API routes...");
     let app = Router::new()
         .route("/api/v1/health", get(health_check))
@@ -183,12 +294,19 @@ pub async fn handle_api_server(
             "/api/v1/sessions/{id}",
             get(get_session).delete(delete_session),
         )
-        .route("/api/v1/sessions/{id}/messages", post(send_message)) // Existing agent-level streaming
+        .route("/api/v1/sessions/{id}/messages", post(send_message).get(get_session_messages)) // Updated with GET for messages
         .route(
             "/api/v1/sessions/{id}/stream",
             post(stream_direct_from_provider),
         ) // NEW: Provider-level token streaming
         .route("/api/v1/sessions/{id}/export", get(export_session))
+        // NEW: Extension management endpoints
+        .route("/api/v1/extensions", get(list_extensions).post(create_extension))
+        .route("/api/v1/extensions/{name}/toggle", put(toggle_extension))
+        .route("/api/v1/extensions/{name}", delete(remove_extension))
+        // NEW: Settings management endpoints
+        .route("/api/v1/settings", get(list_settings).put(update_bulk_settings))
+        .route("/api/v1/settings/{key}", get(get_setting).put(update_setting).delete(reset_setting))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -220,7 +338,7 @@ pub async fn handle_api_server(
     info!("GOOSE_MODEL: {}", {
         std::env::var("GOOSE_MODEL").unwrap_or_else(|_| "unset".to_string())
     });
-    info!("📡 Endpoints: 8 REST API endpoints available");
+    info!("📡 Endpoints: 18 REST API endpoints available");
     info!("🌊 Streaming modes: Agent-level (/messages) + Provider-level (/stream)");
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -316,6 +434,993 @@ async fn create_session(State(state): State<AppState>) -> impl IntoResponse {
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(SessionCreateResponse {
                     session_id: "error".to_string(),
+                }),
+            )
+        }
+    }
+}
+
+// NEW: Settings management endpoints
+
+// Settings registry with metadata
+fn get_settings_registry() -> Vec<(&'static str, &'static str, &'static str, Option<SettingValidation>, bool)> {
+    // (key, description, value_type, validation, restart_required)
+    vec![
+        (
+            "GOOSE_MODEL",
+            "Current LLM model for the agent",
+            "string",
+            None,
+            true,
+        ),
+        (
+            "GOOSE_TEMPERATURE", 
+            "Model temperature for response creativity (0.0-2.0)",
+            "number",
+            Some(SettingValidation {
+                min: Some(0.0),
+                max: Some(2.0),
+                allowed_values: None,
+                pattern: None,
+            }),
+            false,
+        ),
+        (
+            "GOOSE_MODE",
+            "Agent behavior mode controlling tool usage and permissions", 
+            "string",
+            Some(SettingValidation {
+                min: None,
+                max: None,
+                allowed_values: Some(vec!["auto".to_string(), "approve".to_string(), "smart_approve".to_string(), "chat".to_string()]),
+                pattern: None,
+            }),
+            false,
+        ),
+        (
+            "GOOSE_MAX_TURNS",
+            "Maximum number of consecutive agent actions without user input",
+            "number",
+            Some(SettingValidation {
+                min: Some(1.0),
+                max: None,
+                allowed_values: None,
+                pattern: None,
+            }),
+            false,
+        ),
+        (
+            "GOOSE_CLI_MIN_PRIORITY",
+            "Minimum priority level for displaying tool output (0.0=all, 0.2=medium, 0.8=high)",
+            "number", 
+            Some(SettingValidation {
+                min: Some(0.0),
+                max: Some(1.0),
+                allowed_values: None,
+                pattern: None,
+            }),
+            false,
+        ),
+        (
+            "GOOSE_RECIPE_GITHUB_REPO",
+            "GitHub repository for Goose recipes (format: owner/repo)",
+            "string",
+            Some(SettingValidation {
+                min: None,
+                max: None,
+                allowed_values: None,
+                pattern: Some(r"^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$".to_string()),
+            }),
+            false,
+        ),
+        (
+            "GOOSE_AUTO_COMPACT_THRESHOLD",
+            "Token threshold for automatic context compaction",
+            "number",
+            Some(SettingValidation {
+                min: Some(0.0),
+                max: Some(1.0),
+                allowed_values: None,
+                pattern: None,
+            }),
+            false,
+        ),
+    ]
+}
+
+// Get default value for a setting
+fn get_setting_default(key: &str) -> Option<serde_json::Value> {
+    match key {
+        "GOOSE_MODE" => Some(serde_json::Value::String("smart_approve".to_string())),
+        "GOOSE_MAX_TURNS" => Some(serde_json::Value::Number(serde_json::Number::from(1000))),
+        "GOOSE_CLI_MIN_PRIORITY" => Some(serde_json::Value::Number(serde_json::Number::from_f64(0.0).unwrap())),
+        "GOOSE_TEMPERATURE" => Some(serde_json::Value::Number(serde_json::Number::from_f64(0.7).unwrap())),
+        "GOOSE_AUTO_COMPACT_THRESHOLD" => Some(serde_json::Value::Number(serde_json::Number::from_f64(0.8).unwrap())),
+        _ => None,
+    }
+}
+
+// Validate setting value
+fn validate_setting_value(key: &str, value: &serde_json::Value, validation: &Option<SettingValidation>) -> Result<(), String> {
+    if let Some(validation_rules) = validation {
+        // Type validation
+        match key {
+            "GOOSE_TEMPERATURE" | "GOOSE_CLI_MIN_PRIORITY" | "GOOSE_AUTO_COMPACT_THRESHOLD" => {
+                if !value.is_number() {
+                    return Err("Value must be a number".to_string());
+                }
+                
+                let num_val = value.as_f64().ok_or("Invalid number format")?;
+                
+                if let Some(min) = validation_rules.min {
+                    if num_val < min {
+                        return Err(format!("Value must be at least {}", min));
+                    }
+                }
+                
+                if let Some(max) = validation_rules.max {
+                    if num_val > max {
+                        return Err(format!("Value must be at most {}", max));
+                    }
+                }
+            },
+            "GOOSE_MAX_TURNS" => {
+                if !value.is_number() {
+                    return Err("Value must be a number".to_string());
+                }
+                
+                let num_val = value.as_u64().ok_or("Must be a positive integer")?;
+                
+                if num_val < 1 {
+                    return Err("Value must be at least 1".to_string());
+                }
+            },
+            _ => {
+                if !value.is_string() {
+                    return Err("Value must be a string".to_string());
+                }
+            }
+        }
+        
+        // Allowed values validation
+        if let Some(allowed) = &validation_rules.allowed_values {
+            let string_val = value.as_str().ok_or("Value must be a string for enum validation")?;
+            if !allowed.contains(&string_val.to_string()) {
+                return Err(format!("Value must be one of: {}", allowed.join(", ")));
+            }
+        }
+        
+        // Pattern validation
+        if let Some(pattern) = &validation_rules.pattern {
+            let string_val = value.as_str().ok_or("Value must be a string for pattern validation")?;
+            let regex = regex::Regex::new(pattern).map_err(|_| "Invalid regex pattern")?;
+            if !regex.is_match(string_val) {
+                return Err(format!("Value does not match required format: {}", pattern));
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+// List all settings
+async fn list_settings() -> impl IntoResponse {
+    info!("⚙️ Listing all settings...");
+    
+    let config = goose::config::Config::global();
+    let registry = get_settings_registry();
+    let mut settings_info = Vec::new();
+    
+    for (key, description, value_type, validation, restart_required) in registry {
+        // Check for environment variable override
+        let env_override = std::env::var(key).ok();
+        
+        // Get current value from config
+        let current_value: Option<serde_json::Value> = if env_override.is_some() {
+            // Use env var value
+            env_override.as_ref().map(|v| {
+                match value_type {
+                    "number" => {
+                        if let Ok(num) = v.parse::<f64>() {
+                            serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap_or(serde_json::Number::from(0)))
+                        } else {
+                            serde_json::Value::String(v.clone())
+                        }
+                    },
+                    _ => serde_json::Value::String(v.clone())
+                }
+            })
+        } else {
+            // Try to get from config file
+            match value_type {
+                "number" => config.get_param::<f64>(key).ok().map(|v| serde_json::Value::Number(serde_json::Number::from_f64(v).unwrap_or(serde_json::Number::from(0)))),
+                _ => config.get_param::<String>(key).ok().map(|v| serde_json::Value::String(v))
+            }
+        };
+        
+        let setting_info = SettingInfo {
+            key: key.to_string(),
+            value: current_value,
+            default_value: get_setting_default(key),
+            description: description.to_string(),
+            value_type: value_type.to_string(),
+            validation: validation.clone(),
+            env_override: env_override,
+            restart_required,
+        };
+        
+        settings_info.push(setting_info);
+    }
+    
+    let total_count = settings_info.len();
+    info!("✅ Listed {} settings", total_count);
+    
+    (
+        StatusCode::OK,
+        Json(SettingsListResponse {
+            settings: settings_info,
+            total_count,
+        }),
+    )
+}
+
+// Get specific setting
+async fn get_setting(Path(key): Path<String>) -> impl IntoResponse {
+    info!("🔍 Getting setting: {}", key);
+    
+    let registry = get_settings_registry();
+    let setting_meta = registry.iter().find(|(k, _, _, _, _)| *k == key);
+    
+    let (_, description, value_type, validation, restart_required) = match setting_meta {
+        Some(meta) => meta,
+        None => {
+            debug!("❌ Setting not found: {}", key);
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Setting not found",
+                    "message": format!("Setting {} is not supported", key)
+                })),
+            );
+        }
+    };
+    
+    let config = goose::config::Config::global();
+    
+    // Check for environment variable override
+    let env_override = std::env::var(&key).ok();
+    
+    // Get current value
+    let current_value: Option<serde_json::Value> = if env_override.is_some() {
+        // Use env var value
+        env_override.as_ref().map(|v| {
+            match *value_type {
+                "number" => {
+                    if let Ok(num) = v.parse::<f64>() {
+                        serde_json::Value::Number(serde_json::Number::from_f64(num).unwrap_or(serde_json::Number::from(0)))
+                    } else {
+                        serde_json::Value::String(v.clone())
+                    }
+                },
+                _ => serde_json::Value::String(v.clone())
+            }
+        })
+    } else {
+        // Try to get from config file
+        match *value_type {
+            "number" => config.get_param::<f64>(&key).ok().map(|v| serde_json::Value::Number(serde_json::Number::from_f64(v).unwrap_or(serde_json::Number::from(0)))),
+            _ => config.get_param::<String>(&key).ok().map(|v| serde_json::Value::String(v))
+        }
+    };
+    
+    let setting_info = SettingInfo {
+        key: key.clone(),
+        value: current_value,
+        default_value: get_setting_default(&key),
+        description: description.to_string(),
+        value_type: value_type.to_string(),
+        validation: validation.clone(),
+        env_override,
+        restart_required: *restart_required,
+    };
+    
+    info!("✅ Retrieved setting: {}", key);
+    
+    (
+        StatusCode::OK,
+        Json(serde_json::to_value(setting_info).unwrap()),
+    )
+}
+
+// Update specific setting
+async fn update_setting(
+    Path(key): Path<String>,
+    Json(request): Json<SettingUpdateRequest>,
+) -> impl IntoResponse {
+    info!("⚙️ Updating setting {}: {:?}", key, request.value);
+    
+    // Check if setting is supported
+    let registry = get_settings_registry();
+    let setting_meta = registry.iter().find(|(k, _, _, _, _)| *k == key);
+    
+    let (_, _, _, validation, restart_required) = match setting_meta {
+        Some(meta) => meta,
+        None => {
+            debug!("❌ Setting not supported: {}", key);
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Setting not supported",
+                    "message": format!("Setting {} is not configurable via API", key)
+                })),
+            );
+        }
+    };
+    
+    // Check if setting is overridden by environment variable
+    if std::env::var(&key).is_ok() {
+        debug!("❌ Setting {} is overridden by environment variable", key);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Setting overridden",
+                "message": format!("Setting {} is overridden by environment variable and cannot be modified", key)
+            })),
+        );
+    }
+    
+    // Validate the new value
+    if let Err(validation_error) = validate_setting_value(&key, &request.value, validation) {
+        error!("❌ Validation failed for {}: {}", key, validation_error);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Validation failed",
+                "message": validation_error
+            })),
+        );
+    }
+    
+    // Update the setting
+    let config = goose::config::Config::global();
+    
+    match config.set_param(&key, request.value.clone()) {
+        Ok(_) => {
+            info!("✅ Setting {} updated successfully", key);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "Setting updated successfully",
+                    "key": key,
+                    "value": request.value,
+                    "restart_required": restart_required
+                })),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to update setting {}: {}", key, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to update setting",
+                    "message": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+// Reset setting to default
+async fn reset_setting(Path(key): Path<String>) -> impl IntoResponse {
+    info!("🔄 Resetting setting to default: {}", key);
+    
+    // Check if setting is supported
+    let registry = get_settings_registry();
+    let setting_meta = registry.iter().find(|(k, _, _, _, _)| *k == key);
+    
+    if setting_meta.is_none() {
+        debug!("❌ Setting not supported: {}", key);
+        return (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "Setting not supported",
+                "message": format!("Setting {} is not configurable via API", key)
+            })),
+        );
+    }
+    
+    // Check if setting is overridden by environment variable
+    if std::env::var(&key).is_ok() {
+        debug!("❌ Setting {} is overridden by environment variable", key);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "Setting overridden",
+                "message": format!("Setting {} is overridden by environment variable and cannot be reset", key)
+            })),
+        );
+    }
+    
+    let config = goose::config::Config::global();
+    
+    // Delete the setting to reset to default
+    match config.delete(&key) {
+        Ok(_) => {
+            let default_value = get_setting_default(&key);
+            info!("✅ Setting {} reset to default", key);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "Setting reset to default successfully",
+                    "key": key,
+                    "default_value": default_value
+                })),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to reset setting {}: {}", key, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to reset setting",
+                    "message": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+// Bulk update settings
+async fn update_bulk_settings(Json(request): Json<BulkSettingsUpdateRequest>) -> impl IntoResponse {
+    info!("⚙️ Bulk updating {} settings", request.settings.len());
+    
+    let registry = get_settings_registry();
+    let config = goose::config::Config::global();
+    
+    let mut results = Vec::new();
+    let mut success_count = 0;
+    let mut any_restart_required = false;
+    
+    let total_settings = request.settings.len();
+    
+    for (key, value) in &request.settings {
+        // Check if setting is supported
+        let setting_meta = registry.iter().find(|(k, _, _, _, _)| *k == key);
+        
+        let (_, _, _, validation, restart_required) = match setting_meta {
+            Some(meta) => meta,
+            None => {
+                results.push(serde_json::json!({
+                    "key": key,
+                    "success": false,
+                    "error": format!("Setting {} is not supported", key)
+                }));
+                continue;
+            }
+        };
+        
+        // Check if setting is overridden by environment variable
+        if std::env::var(&key).is_ok() {
+            results.push(serde_json::json!({
+                "key": key,
+                "success": false,
+                "error": format!("Setting {} is overridden by environment variable", key)
+            }));
+            continue;
+        }
+        
+        // Validate the value
+        if let Err(validation_error) = validate_setting_value(&key, &value, validation) {
+            results.push(serde_json::json!({
+                "key": key,
+                "success": false,
+                "error": validation_error
+            }));
+            continue;
+        }
+        
+        // Update the setting
+        match config.set_param(&key, value.clone()) {
+            Ok(_) => {
+                success_count += 1;
+                if *restart_required {
+                    any_restart_required = true;
+                }
+                results.push(serde_json::json!({
+                    "key": key,
+                    "success": true,
+                    "value": value,
+                    "restart_required": restart_required
+                }));
+            }
+            Err(e) => {
+                results.push(serde_json::json!({
+                    "key": key,
+                    "success": false,
+                    "error": e.to_string()
+                }));
+            }
+        }
+    }
+    
+    info!("✅ Bulk update completed: {}/{} settings updated", success_count, total_settings);
+    
+    (
+        StatusCode::OK,
+        Json(serde_json::json!({
+            "message": format!("Bulk update completed: {}/{} settings updated", success_count, total_settings),
+            "success_count": success_count,
+            "total_count": total_settings,
+            "restart_required": any_restart_required,
+            "results": results
+        })),
+    )
+}
+
+// NEW: Extension management endpoints
+
+// List all extensions
+async fn list_extensions() -> impl IntoResponse {
+    info!("🧩 Listing all extensions...");
+
+    match ExtensionConfigManager::get_all() {
+        Ok(extensions) => {
+            let mut extension_infos = Vec::new();
+            
+            for ext_entry in extensions {
+                let ext_config = &ext_entry.config;
+                
+                let extension_info = ExtensionInfo {
+                    name: ext_config.name().clone(),
+                    display_name: match ext_config {
+                        ExtensionConfig::Builtin { display_name, .. } => display_name.clone(),
+                        ExtensionConfig::Stdio { .. } => None,
+                        ExtensionConfig::Sse { .. } => None,
+                        ExtensionConfig::StreamableHttp { .. } => None,
+                        ExtensionConfig::Frontend { .. } => None,
+                        ExtensionConfig::InlinePython { .. } => None,
+                    },
+                    extension_type: match ext_config {
+                        ExtensionConfig::Builtin { .. } => "builtin".to_string(),
+                        ExtensionConfig::Stdio { .. } => "stdio".to_string(),
+                        ExtensionConfig::Sse { .. } => "sse".to_string(),
+                        ExtensionConfig::StreamableHttp { .. } => "streamable_http".to_string(),
+                        ExtensionConfig::Frontend { .. } => "frontend".to_string(),
+                        ExtensionConfig::InlinePython { .. } => "inline_python".to_string(),
+                    },
+                    enabled: ext_entry.enabled,
+                    timeout: match ext_config {
+                        ExtensionConfig::Builtin { timeout, .. } => *timeout,
+                        ExtensionConfig::Stdio { timeout, .. } => *timeout,
+                        ExtensionConfig::Sse { timeout, .. } => *timeout,
+                        ExtensionConfig::StreamableHttp { timeout, .. } => *timeout,
+                        ExtensionConfig::Frontend { .. } => None, // Frontend doesn't have timeout
+                        ExtensionConfig::InlinePython { timeout, .. } => *timeout,
+                    },
+                    cmd: match ext_config {
+                        ExtensionConfig::Stdio { cmd, .. } => Some(cmd.clone()),
+                        _ => None,
+                    },
+                    args: match ext_config {
+                        ExtensionConfig::Stdio { args, .. } => Some(args.clone()),
+                        _ => None,
+                    },
+                    bundled: match ext_config {
+                        ExtensionConfig::Builtin { bundled, .. } => *bundled,
+                        _ => None,
+                    },
+                    description: match ext_config {
+                        ExtensionConfig::Builtin { description, .. } => description.clone(),
+                        ExtensionConfig::Stdio { description, .. } => description.clone(),
+                        ExtensionConfig::Sse { description, .. } => description.clone(),
+                        ExtensionConfig::StreamableHttp { description, .. } => description.clone(),
+                        ExtensionConfig::Frontend { instructions, .. } => instructions.clone(),
+                        ExtensionConfig::InlinePython { description, .. } => description.clone(),
+                    },
+                };
+                
+                extension_infos.push(extension_info);
+            }
+            
+            // Sort extensions alphabetically
+            extension_infos.sort_by(|a, b| a.name.cmp(&b.name));
+            
+            let total_count = extension_infos.len();
+            info!("✅ Listed {} extensions", total_count);
+            
+            (
+                StatusCode::OK,
+                Json(ExtensionListResponse {
+                    extensions: extension_infos,
+                    total_count,
+                }),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to list extensions: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ExtensionListResponse {
+                    extensions: vec![],
+                    total_count: 0,
+                }),
+            )
+        }
+    }
+}
+
+// Create new extension
+async fn create_extension(Json(request): Json<ExtensionCreateRequest>) -> impl IntoResponse {
+    info!("➕ Creating extension: {}", request.name);
+    
+    // Validate required fields based on extension type
+    let extension_config = match request.extension_type.as_str() {
+        "builtin" => {
+            ExtensionConfig::Builtin {
+                name: request.name.clone(),
+                display_name: request.display_name,
+                timeout: request.timeout,
+                bundled: request.bundled,
+                description: request.description,
+                available_tools: Vec::new(),
+            }
+        }
+        "stdio" => {
+            let cmd = match request.cmd {
+                Some(cmd) => cmd,
+                None => {
+                    error!("❌ cmd is required for stdio extensions");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "Missing required field",
+                            "message": "cmd is required for stdio extensions"
+                        })),
+                    );
+                }
+            };
+            let args = request.args.unwrap_or_default();
+            
+            ExtensionConfig::Stdio {
+                name: request.name.clone(),
+                cmd,
+                args,
+                envs: goose::agents::extension::Envs::new(request.envs.unwrap_or_default()),
+                env_keys: request.env_keys.unwrap_or_default(),
+                description: request.description,
+                timeout: request.timeout,
+                bundled: request.bundled,
+                available_tools: Vec::new(),
+            }
+        }
+        "sse" => {
+            let uri = match request.uri {
+                Some(uri) => uri,
+                None => {
+                    error!("❌ uri is required for sse extensions");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "Missing required field",
+                            "message": "uri is required for sse extensions"
+                        })),
+                    );
+                }
+            };
+            
+            ExtensionConfig::Sse {
+                name: request.name.clone(),
+                uri,
+                envs: goose::agents::extension::Envs::new(request.envs.unwrap_or_default()),
+                env_keys: request.env_keys.unwrap_or_default(),
+                description: request.description,
+                timeout: request.timeout,
+                bundled: request.bundled,
+                available_tools: Vec::new(),
+            }
+        }
+        "streamable_http" => {
+            let uri = match request.uri {
+                Some(uri) => uri,
+                None => {
+                    error!("❌ uri is required for streamable_http extensions");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "Missing required field",
+                            "message": "uri is required for streamable_http extensions"
+                        })),
+                    );
+                }
+            };
+            
+            ExtensionConfig::StreamableHttp {
+                name: request.name.clone(),
+                uri,
+                envs: goose::agents::extension::Envs::new(request.envs.unwrap_or_default()),
+                env_keys: request.env_keys.unwrap_or_default(),
+                headers: request.headers.unwrap_or_default(),
+                description: request.description,
+                timeout: request.timeout,
+                bundled: request.bundled,
+                available_tools: Vec::new(),
+            }
+        }
+        "frontend" => {
+            ExtensionConfig::Frontend {
+                name: request.name.clone(),
+                tools: Vec::new(),
+                instructions: Some(request.description.unwrap_or_default()),
+                available_tools: Vec::new(),
+                bundled: request.bundled,
+            }
+        }
+        "inline_python" => {
+            let python_code = match request.python_code {
+                Some(code) => code,
+                None => {
+                    error!("❌ python_code is required for inline_python extensions");
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "Missing required field",
+                            "message": "python_code is required for inline_python extensions"
+                        })),
+                    );
+                }
+            };
+            
+            ExtensionConfig::InlinePython {
+                name: request.name.clone(),
+                code: python_code,
+                dependencies: Some(Vec::new()),
+                available_tools: Vec::new(),
+                description: request.description,
+                timeout: request.timeout,
+            }
+        }
+        _ => {
+            error!("❌ Invalid extension type: {}", request.extension_type);
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "Invalid extension type",
+                    "message": format!("Unsupported extension type: {}", request.extension_type)
+                })),
+            );
+        }
+    };
+    
+    let extension_entry = ExtensionEntry {
+        enabled: true, // New extensions are enabled by default
+        config: extension_config,
+    };
+    
+    match ExtensionConfigManager::set(extension_entry) {
+        Ok(_) => {
+            info!("✅ Extension {} created successfully", request.name);
+            (
+                StatusCode::CREATED,
+                Json(serde_json::json!({
+                    "message": "Extension created successfully",
+                    "name": request.name,
+                    "enabled": true
+                })),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to create extension {}: {}", request.name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to create extension",
+                    "message": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+// Toggle extension enabled/disabled
+async fn toggle_extension(
+    Path(name): Path<String>,
+    Json(request): Json<ExtensionToggleRequest>,
+) -> impl IntoResponse {
+    info!("🔄 Toggling extension {}: enabled={}", name, request.enabled);
+    
+    let key = goose::config::extensions::name_to_key(&name);
+    
+    match ExtensionConfigManager::set_enabled(&key, request.enabled) {
+        Ok(_) => {
+            info!("✅ Extension {} toggled successfully", name);
+            (
+                StatusCode::OK,
+                Json(serde_json::json!({
+                    "message": "Extension toggled successfully",
+                    "name": name,
+                    "enabled": request.enabled
+                })),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to toggle extension {}: {}", name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to toggle extension",
+                    "message": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+// Remove extension (only if disabled)
+async fn remove_extension(Path(name): Path<String>) -> impl IntoResponse {
+    info!("🗑️ Removing extension: {}", name);
+    
+    // Check if extension exists and is disabled
+    match ExtensionConfigManager::get_all() {
+        Ok(extensions) => {
+            let extension = extensions.iter().find(|ext| ext.config.name() == name);
+            
+            match extension {
+                Some(ext) if ext.enabled => {
+                    debug!("❌ Extension {} is enabled, cannot remove", name);
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "Extension is enabled",
+                            "message": "Cannot remove enabled extension. Disable it first."
+                        })),
+                    );
+                }
+                Some(_) => {
+                    // Extension exists and is disabled, proceed with removal
+                }
+                None => {
+                    debug!("❌ Extension {} not found", name);
+                    return (
+                        StatusCode::NOT_FOUND,
+                        Json(serde_json::json!({
+                            "error": "Extension not found",
+                            "message": format!("Extension {} does not exist", name)
+                        })),
+                    );
+                }
+            }
+        }
+        Err(e) => {
+            error!("❌ Failed to check extensions: {}", e);
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to check extensions",
+                    "message": e.to_string()
+                })),
+            );
+        }
+    }
+    
+    let key = goose::config::extensions::name_to_key(&name);
+    
+    match ExtensionConfigManager::remove(&key) {
+        Ok(_) => {
+            info!("✅ Extension {} removed successfully", name);
+            (
+                StatusCode::NO_CONTENT,
+                Json(serde_json::json!({
+                    "message": "Extension removed successfully",
+                    "name": name
+                })),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to remove extension {}: {}", name, e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to remove extension",
+                    "message": e.to_string()
+                })),
+            )
+        }
+    }
+}
+
+// NEW: Get session messages endpoint
+async fn get_session_messages(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    info!("📋 Getting messages for session: {}", session_id);
+
+    // Verify session exists in MongoDB
+    match state.db.get_session(&session_id).await {
+        Ok(Some(_)) => {
+            debug!("✅ Session found in MongoDB: {}", session_id);
+        }
+        Ok(None) => {
+            debug!("❌ Session not found in MongoDB: {}", session_id);
+            return (
+                StatusCode::NOT_FOUND,
+                Json(SessionMessagesResponse {
+                    session_id: session_id.clone(),
+                    messages: vec![],
+                    total_count: 0,
+                }),
+            );
+        }
+        Err(e) => {
+            error!(
+                "❌ Failed to query session {} from MongoDB: {}",
+                session_id, e
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SessionMessagesResponse {
+                    session_id: session_id.clone(),
+                    messages: vec![],
+                    total_count: 0,
+                }),
+            );
+        }
+    }
+
+    // Load conversation from MongoDB
+    match state.db.get_conversation(&session_id).await {
+        Ok(conversation) => {
+            debug!(
+                "✅ Loaded conversation with {} messages",
+                conversation.messages().len()
+            );
+
+            let mut session_messages = Vec::new();
+            for (index, message) in conversation.messages().iter().enumerate() {
+                // Extract role as string (removing Debug formatting)
+                let role_str = format!("{:?}", message.role);
+                
+                // Get message content
+                let content = message.as_concat_text();
+                
+                // Create timestamp (we don't have access to creation time from GooseMessage,
+                // so we'll leave it as None for now)
+                let timestamp = None;
+
+                session_messages.push(SessionMessage {
+                    role: role_str,
+                    content,
+                    timestamp,
+                    message_index: index,
+                });
+            }
+
+            let total_count = session_messages.len();
+            info!(
+                "✅ Retrieved {} messages for session {}",
+                total_count, session_id
+            );
+
+            (
+                StatusCode::OK,
+                Json(SessionMessagesResponse {
+                    session_id,
+                    messages: session_messages,
+                    total_count,
+                }),
+            )
+        }
+        Err(e) => {
+            error!(
+                "❌ Failed to load conversation for session {} from MongoDB: {}",
+                session_id, e
+            );
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(SessionMessagesResponse {
+                    session_id,
+                    messages: vec![],
+                    total_count: 0,
                 }),
             )
         }
@@ -791,24 +1896,133 @@ fn create_agent_stream(
                             let content = msg.as_concat_text();
                             debug!("💬 Agent message: {:?} - {} chars", msg.role, content.len());
 
-                            let event_data = StreamEvent {
-                                event_type: "message".to_string(),
-                                content: serde_json::json!({
-                                    "role": format!("{:?}", msg.role),
-                                    "content": content,
-                                    "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
-                                    "session_id": session_id
-                                }),
-                            };
+                            // Handle different message content types
+                            for message_content in &msg.content {
+                                match message_content {
+                                    goose::conversation::message::MessageContent::Text(text) => {
+                                        let event_data = StreamEvent {
+                                            event_type: "message".to_string(),
+                                            content: serde_json::json!({
+                                                "role": format!("{:?}", msg.role),
+                                                "content": text.text,
+                                                "content_type": "text",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
 
-                            // Collect assistant content for saving to MongoDB
-                            let role_str = format!("{:?}", msg.role);
-                            if role_str == "Assistant" {
-                                assistant_content.push_str(&content);
-                            }
+                                        // Collect assistant content for saving to MongoDB
+                                        let role_str = format!("{:?}", msg.role);
+                                        if role_str == "Assistant" {
+                                            assistant_content.push_str(&text.text);
+                                        }
 
-                            if let Ok(data) = serde_json::to_string(&event_data) {
-                                yield Ok(Event::default().data(data));
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::ToolRequest(req) => {
+                                        debug!("🔧 Tool request: {}", req.to_readable_string());
+                                        
+                                        let event_data = StreamEvent {
+                                            event_type: "tool_request".to_string(),
+                                            content: serde_json::json!({
+                                                "id": req.id,
+                                                "tool_name": req.tool_call.as_ref().map(|tc| &tc.name).unwrap_or(&"unknown".to_string()),
+                                                "arguments": req.tool_call.as_ref().map(|tc| &tc.arguments).unwrap_or(&serde_json::Value::Null),
+                                                "content_type": "tool_request",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
+
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::ToolResponse(resp) => {
+                                        debug!("🔨 Tool response: ID {}", resp.id);
+                                        
+                                        let event_data = StreamEvent {
+                                            event_type: "tool_response".to_string(),
+                                            content: serde_json::json!({
+                                                "id": resp.id,
+                                                "result": resp.tool_result,
+                                                "is_error": resp.tool_result.is_err(),
+                                                "content_type": "tool_response",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
+
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::ToolConfirmationRequest(confirmation) => {
+                                        debug!("🔍 Tool confirmation request: {}", confirmation.tool_name);
+                                        
+                                        let event_data = StreamEvent {
+                                            event_type: "tool_confirmation".to_string(),
+                                            content: serde_json::json!({
+                                                "id": confirmation.id,
+                                                "tool_name": confirmation.tool_name,
+                                                "arguments": confirmation.arguments,
+                                                "needs_confirmation": true,
+                                                "content_type": "tool_confirmation",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
+
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::Thinking(thinking) => {
+                                        debug!("🤔 Thinking: {}", thinking.thinking);
+                                        
+                                        let event_data = StreamEvent {
+                                            event_type: "thinking".to_string(),
+                                            content: serde_json::json!({
+                                                "message": thinking.thinking,
+                                                "signature": thinking.signature,
+                                                "content_type": "thinking",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
+
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::ContextLengthExceeded(ctx_msg) => {
+                                        debug!("📉 Context length exceeded: {}", ctx_msg.msg);
+                                        
+                                        let event_data = StreamEvent {
+                                            event_type: "context_exceeded".to_string(),
+                                            content: serde_json::json!({
+                                                "message": ctx_msg.msg,
+                                                "content_type": "context_exceeded",
+                                                "timestamp": SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                                                "session_id": session_id
+                                            }),
+                                        };
+
+                                        if let Ok(data) = serde_json::to_string(&event_data) {
+                                            yield Ok(Event::default().data(data));
+                                        }
+                                    },
+                                    goose::conversation::message::MessageContent::Image(_) => {
+                                        // Handle image content if needed
+                                        debug!("🖼️ Image content in message");
+                                    },
+                                    _ => {
+                                        // Handle other content types (FrontendToolRequest, RedactedThinking, etc.)
+                                        debug!("📝 Other message content type");
+                                    }
+                                }
                             }
                         },
                         Ok(AgentEvent::McpNotification(notif)) => {
