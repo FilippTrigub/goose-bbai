@@ -56,6 +56,15 @@ struct MessageRequest {
 }
 
 #[derive(Serialize)]
+struct MessageResponse {
+    message: String,
+    session_id: String,
+    assistant_response: String,
+    timestamp: u64,
+    tool_calls_count: usize,
+}
+
+#[derive(Serialize)]
 struct StreamEvent {
     #[serde(rename = "type")]
     event_type: String,
@@ -294,7 +303,8 @@ pub async fn handle_api_server(
             "/api/v1/sessions/{id}",
             get(get_session).delete(delete_session),
         )
-        .route("/api/v1/sessions/{id}/messages", post(send_message).get(get_session_messages)) // Updated with GET for messages
+        .route("/api/v1/sessions/{id}/messages", post(send_message).get(get_session_messages)) // Streaming version
+        .route("/api/v1/sessions/{id}/send", post(send_message_sync)) // Non-streaming fire-and-forget version
         .route(
             "/api/v1/sessions/{id}/stream",
             post(stream_direct_from_provider),
@@ -338,7 +348,7 @@ pub async fn handle_api_server(
     info!("GOOSE_MODEL: {}", {
         std::env::var("GOOSE_MODEL").unwrap_or_else(|_| "unset".to_string())
     });
-    info!("📡 Endpoints: 18 REST API endpoints available");
+    info!("📡 Endpoints: 19 REST API endpoints available");
     info!("🌊 Streaming modes: Agent-level (/messages) + Provider-level (/stream)");
 
     let listener = tokio::net::TcpListener::bind(addr)
@@ -1562,7 +1572,7 @@ async fn delete_session(
     }
 }
 
-// EXISTING: Agent-level streaming (unchanged)
+// EXISTING: Agent-level streaming - refactored to use shared logic
 async fn send_message(
     Path(session_id): Path<String>,
     State(state): State<AppState>,
@@ -1574,93 +1584,14 @@ async fn send_message(
     );
     debug!("📝 Message content: {}", request.message);
 
-    // Verify session exists in MongoDB
-    match state.db.get_session(&session_id).await {
-        Ok(Some(_)) => {
-            debug!("✅ Session found in MongoDB: {}", session_id);
-        }
-        Ok(None) => {
-            warn!("❌ Session not found in MongoDB: {}", session_id);
+    // Use shared message processing logic
+    let (conversation, _user_message) = match process_user_message(&session_id, &request.message, &state).await {
+        Ok(result) => result,
+        Err((_status, json_response)) => {
+            // Convert JSON error to SSE error format
             let error_data = serde_json::to_string(&StreamEvent {
                 event_type: "error".to_string(),
-                content: serde_json::json!({
-                    "message": "Session not found in MongoDB",
-                    "session_id": session_id.clone()
-                }),
-            })
-            .unwrap();
-
-            return Sse::new(stream::once(async move {
-                Ok::<_, Infallible>(Event::default().data(error_data))
-            }))
-            .keep_alive(KeepAlive::default())
-            .into_response();
-        }
-        Err(e) => {
-            let error_msg = e.to_string();
-            error!(
-                "❌ Failed to check session {} in MongoDB: {}",
-                session_id, error_msg
-            );
-            let error_data = serde_json::to_string(&StreamEvent {
-                event_type: "error".to_string(),
-                content: serde_json::json!({
-                    "message": "MongoDB connection error",
-                    "error": error_msg
-                }),
-            })
-            .unwrap();
-
-            return Sse::new(stream::once(async move {
-                Ok::<_, Infallible>(Event::default().data(error_data))
-            }))
-            .keep_alive(KeepAlive::default())
-            .into_response();
-        }
-    }
-
-    // Save user message to MongoDB
-    debug!("💾 Saving user message to MongoDB...");
-    let user_message = GooseMessage::user().with_text(&request.message);
-    if let Err(e) = state.db.add_message(&session_id, &user_message).await {
-        let error_msg = e.to_string();
-        error!("❌ Failed to save user message to MongoDB: {}", error_msg);
-        let error_data = serde_json::to_string(&StreamEvent {
-            event_type: "error".to_string(),
-            content: serde_json::json!({
-                "message": "Failed to save message to MongoDB",
-                "error": error_msg
-            }),
-        })
-        .unwrap();
-
-        return Sse::new(stream::once(async move {
-            Ok::<_, Infallible>(Event::default().data(error_data))
-        }))
-        .keep_alive(KeepAlive::default())
-        .into_response();
-    }
-    debug!("✅ User message saved to MongoDB");
-
-    // Load conversation history from MongoDB
-    debug!("📖 Loading conversation history from MongoDB...");
-    let conversation = match state.db.get_conversation(&session_id).await {
-        Ok(conv) => {
-            info!(
-                "✅ Loaded conversation with {} messages from MongoDB",
-                conv.messages().len()
-            );
-            conv
-        }
-        Err(e) => {
-            let error_msg = e.to_string();
-            error!("❌ Failed to load conversation from MongoDB: {}", error_msg);
-            let error_data = serde_json::to_string(&StreamEvent {
-                event_type: "error".to_string(),
-                content: serde_json::json!({
-                    "message": "Failed to load conversation from MongoDB",
-                    "error": error_msg
-                }),
+                content: json_response.0,
             })
             .unwrap();
 
@@ -1684,6 +1615,208 @@ async fn send_message(
     Sse::new(agent_stream)
         .keep_alive(KeepAlive::default())
         .into_response()
+}
+
+
+
+// Shared function for processing user messages (used by both streaming and non-streaming)
+async fn process_user_message(
+    session_id: &str,
+    message_content: &str,
+    state: &AppState,
+) -> Result<(Conversation, GooseMessage), (StatusCode, Json<serde_json::Value>)> {
+    // Verify session exists in MongoDB
+    match state.db.get_session(session_id).await {
+        Ok(Some(_)) => {
+            debug!("✅ Session found in MongoDB: {}", session_id);
+        }
+        Ok(None) => {
+            warn!("❌ Session not found in MongoDB: {}", session_id);
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Session not found",
+                    "message": format!("Session {} not found in MongoDB", session_id)
+                })),
+            ));
+        }
+        Err(e) => {
+            error!(
+                "❌ Failed to check session {} in MongoDB: {}",
+                session_id, e
+            );
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Database error",
+                    "message": "Failed to query session from MongoDB"
+                })),
+            ));
+        }
+    }
+
+    // Save user message to MongoDB
+    debug!("💾 Saving user message to MongoDB...");
+    let user_message = GooseMessage::user().with_text(message_content);
+    if let Err(e) = state.db.add_message(session_id, &user_message).await {
+        error!("❌ Failed to save user message to MongoDB: {}", e);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "error": "Failed to save message",
+                "message": "Could not save user message to database"
+            })),
+        ));
+    }
+    debug!("✅ User message saved to MongoDB");
+
+    // Load conversation history from MongoDB
+    debug!("📖 Loading conversation history from MongoDB...");
+    let conversation = match state.db.get_conversation(session_id).await {
+        Ok(conv) => {
+            info!(
+                "✅ Loaded conversation with {} messages from MongoDB",
+                conv.messages().len()
+            );
+            conv
+        }
+        Err(e) => {
+            error!("❌ Failed to load conversation from MongoDB: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to load conversation",
+                    "message": "Could not load conversation history from database"
+                })),
+            ));
+        }
+    };
+
+    Ok((conversation, user_message))
+}
+
+// NEW: Non-streaming fire-and-forget message endpoint
+async fn send_message_sync(
+    Path(session_id): Path<String>,
+    State(state): State<AppState>,
+    Json(request): Json<MessageRequest>,
+) -> impl IntoResponse {
+    info!(
+        "💬 [Fire-and-Forget] Processing message for session {}",
+        session_id
+    );
+    debug!("📝 Message content: {}", request.message);
+
+    // Use shared message processing logic
+    let (conversation, _user_message) = match process_user_message(&session_id, &request.message, &state).await {
+        Ok(result) => result,
+        Err(error_response) => return error_response,
+    };
+
+    // Process the message without streaming
+    info!("🤖 [Fire-and-Forget] Starting agent processing...");
+    match state.agent.reply(conversation.clone(), None, None).await {
+        Ok(mut event_stream) => {
+            let mut assistant_content = String::new();
+            let mut tool_calls_count = 0;
+
+            // Process all events without streaming
+            while let Some(result) = event_stream.next().await {
+                match result {
+                    Ok(AgentEvent::Message(msg)) => {
+                        // Collect assistant content and count tools
+                        for message_content in &msg.content {
+                            match message_content {
+                                goose::conversation::message::MessageContent::Text(text) => {
+                                    let role_str = format!("{:?}", msg.role);
+                                    if role_str == "Assistant" {
+                                        assistant_content.push_str(&text.text);
+                                    }
+                                },
+                                goose::conversation::message::MessageContent::ToolRequest(_) => {
+                                    tool_calls_count += 1;
+                                    debug!("🔧 Tool call detected (non-streaming)");
+                                },
+                                _ => {
+                                    debug!("📝 Other message content processed (non-streaming)");
+                                }
+                            }
+                        }
+                    },
+                    Ok(AgentEvent::HistoryReplaced(new_messages)) => {
+                        info!("🔄 Agent replaced conversation history with {} messages", new_messages.len());
+                        
+                        // Update MongoDB with new conversation history
+                        let new_conversation = Conversation::new_unvalidated(new_messages);
+                        if let Err(e) = state.db.update_conversation(&session_id, &new_conversation).await {
+                            error!("❌ Failed to update conversation in MongoDB: {}", e);
+                        } else {
+                            debug!("✅ Updated conversation in MongoDB");
+                        }
+                    },
+                    Ok(AgentEvent::McpNotification(_)) => {
+                        debug!("🔔 MCP notification received (non-streaming)");
+                    },
+                    Ok(AgentEvent::ModelChange { .. }) => {
+                        debug!("🔄 Model change event (non-streaming)");
+                    },
+                    Err(e) => {
+                        error!("❌ Agent processing error: {}", e);
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            Json(serde_json::json!({
+                                "error": "Agent processing failed",
+                                "message": e.to_string(),
+                                "session_id": session_id
+                            })),
+                        );
+                    }
+                }
+            }
+
+            // Save final assistant response to MongoDB
+            if !assistant_content.is_empty() {
+                debug!("💾 Saving assistant response to MongoDB ({} chars)", assistant_content.len());
+                let assistant_message = GooseMessage::assistant().with_text(&assistant_content);
+                if let Err(e) = state.db.add_message(&session_id, &assistant_message).await {
+                    error!("❌ Failed to save assistant message to MongoDB: {}", e);
+                    return (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(serde_json::json!({
+                            "error": "Failed to save response",
+                            "message": "Could not save assistant response to database"
+                        })),
+                    );
+                } else {
+                    debug!("✅ Assistant response saved to MongoDB");
+                }
+            }
+
+            info!("✅ [Fire-and-Forget] Processing completed for session: {}", session_id);
+            
+            (
+                StatusCode::OK,
+                Json(serde_json::to_value(MessageResponse {
+                    message: "Message processed successfully".to_string(),
+                    session_id: session_id.clone(),
+                    assistant_response: assistant_content,
+                    timestamp: SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs(),
+                    tool_calls_count,
+                }).unwrap()),
+            )
+        }
+        Err(e) => {
+            error!("❌ Failed to start agent processing: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "Failed to start agent processing",
+                    "message": e.to_string(),
+                    "session_id": session_id
+                })),
+            )
+        }
+    }
 }
 
 // NEW: Provider-level token streaming endpoint
