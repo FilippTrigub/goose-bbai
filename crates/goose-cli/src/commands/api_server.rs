@@ -10,6 +10,7 @@ use axum::{
     routing::{delete, get, post, put},
     Router,
 };
+use async_stream;
 use futures::{stream, StreamExt};
 use goose::agents::{Agent, AgentEvent};
 use goose::conversation::message::Message as GooseMessage;
@@ -19,16 +20,38 @@ use goose::config::{ExtensionConfigManager, ExtensionEntry};
 use goose::agents::ExtensionConfig;
 use rmcp::model::Tool;
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, net::SocketAddr, sync::Arc, time::SystemTime, collections::HashMap};
+use std::{convert::Infallible, net::SocketAddr, sync::{Arc, RwLock}, time::{SystemTime}, collections::HashMap};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
 
-// Updated AppState with direct provider access
+// Agent status structures
+#[derive(Debug, Clone, Serialize)]
+struct AgentStatus {
+    session_id: String,
+    endpoint_type: String,
+    status: String, // "idle", "processing", "completed", "error"
+    start_time: SystemTime,
+    last_update: SystemTime,
+}
+
+#[derive(Serialize)]
+struct AgentStatusResponse {
+    overall_status: String,
+    active_sessions: usize,
+    total_processed: usize,
+    uptime_seconds: u64,
+    sessions: Vec<AgentStatus>,
+}
+
+// Updated AppState with direct provider access and agent status tracking
 #[derive(Clone)]
 struct AppState {
     agent: Arc<Agent>,
     provider: Arc<dyn Provider>, // Direct provider access for token streaming
     db: Arc<DatabaseManager>,
+    agent_status: Arc<RwLock<HashMap<String, AgentStatus>>>,
+    server_start_time: SystemTime,
+    processed_count: Arc<RwLock<usize>>,
 }
 
 #[derive(Serialize)]
@@ -288,10 +311,14 @@ pub async fn handle_api_server(
         .await
         .context("Failed to initialize MongoDB connection")?;
 
+    let server_start_time = SystemTime::now();
     let app_state = AppState {
         agent: Arc::new(agent),
         provider: provider, // Direct provider access for token streaming
         db: Arc::new(db_manager),
+        agent_status: Arc::new(RwLock::new(HashMap::new())),
+        server_start_time,
+        processed_count: Arc::new(RwLock::new(0)),
     };
 
     // Build router with extension management endpoints
@@ -317,6 +344,8 @@ pub async fn handle_api_server(
         // NEW: Settings management endpoints
         .route("/api/v1/settings", get(list_settings).put(update_bulk_settings))
         .route("/api/v1/settings/{key}", get(get_setting).put(update_setting).delete(reset_setting))
+        // NEW: Agent status endpoint
+        .route("/api/v1/agent/status", get(get_agent_status))
         .layer(
             CorsLayer::new()
                 .allow_origin(Any)
@@ -424,6 +453,95 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     info!("MONGODB_URL: {:?}", std::env::var("MONGODB_URL"));
 
     (status_code, Json(response))
+}
+
+// NEW: Agent status management functions
+fn set_agent_status(state: &AppState, session_id: &str, endpoint_type: &str, status: &str) {
+    let mut status_map = state.agent_status.write().unwrap();
+    let now = SystemTime::now();
+    
+    let agent_status = AgentStatus {
+        session_id: session_id.to_string(),
+        endpoint_type: endpoint_type.to_string(),
+        status: status.to_string(),
+        start_time: if status == "processing" { now } else { 
+            status_map.get(session_id).map(|s| s.start_time).unwrap_or(now)
+        },
+        last_update: now,
+    };
+    
+    status_map.insert(session_id.to_string(), agent_status);
+    
+    // Increment processed count when completing
+    if status == "completed" {
+        let mut count = state.processed_count.write().unwrap();
+        *count += 1;
+    }
+    
+    debug!("🔄 Agent status updated: {} -> {} ({})", session_id, status, endpoint_type);
+}
+
+fn cleanup_old_sessions(state: &AppState) {
+    let mut status_map = state.agent_status.write().unwrap();
+    let now = SystemTime::now();
+    let timeout_duration = std::time::Duration::from_secs(300); // 5 minutes
+    
+    status_map.retain(|_, status| {
+        match now.duration_since(status.last_update) {
+            Ok(duration) => {
+                let should_keep = duration < timeout_duration;
+                if !should_keep {
+                    debug!("🧹 Cleaning up old session: {}", status.session_id);
+                }
+                should_keep
+            },
+            Err(_) => true, // Keep if we can't determine duration
+        }
+    });
+}
+
+// NEW: Get agent status endpoint
+async fn get_agent_status(State(state): State<AppState>) -> impl IntoResponse {
+    info!("📊 Getting agent status...");
+    
+    // Clean up old sessions first
+    cleanup_old_sessions(&state);
+    
+    let status_map = state.agent_status.read().unwrap();
+    let processed_count = *state.processed_count.read().unwrap();
+    
+    // Count active sessions
+    let active_sessions = status_map.values()
+        .filter(|s| s.status == "processing")
+        .count();
+    
+    // Determine overall status
+    let overall_status = if active_sessions > 0 {
+        "processing"
+    } else {
+        "idle"
+    };
+    
+    // Calculate uptime
+    let uptime_seconds = SystemTime::now()
+        .duration_since(state.server_start_time)
+        .unwrap_or_default()
+        .as_secs();
+    
+    // Collect session statuses
+    let sessions: Vec<AgentStatus> = status_map.values().cloned().collect();
+    
+    let response = AgentStatusResponse {
+        overall_status: overall_status.to_string(),
+        active_sessions,
+        total_processed: processed_count,
+        uptime_seconds,
+        sessions,
+    };
+    
+    info!("✅ Agent status: {} active, {} total processed", active_sessions, processed_count);
+    
+    (StatusCode::OK, Json(response))
 }
 
 // Create session endpoint
@@ -1584,10 +1702,16 @@ async fn send_message(
     );
     debug!("📝 Message content: {}", request.message);
 
+    // Set processing status
+    set_agent_status(&state, &session_id, "agent-streaming", "processing");
+
     // Use shared message processing logic
     let (conversation, _user_message) = match process_user_message(&session_id, &request.message, &state).await {
         Ok(result) => result,
         Err((_status, json_response)) => {
+            // Set error status
+            set_agent_status(&state, &session_id, "agent-streaming", "error");
+            
             // Convert JSON error to SSE error format
             let error_data = serde_json::to_string(&StreamEvent {
                 event_type: "error".to_string(),
@@ -1608,6 +1732,7 @@ async fn send_message(
     let agent_stream = create_agent_stream(
         state.agent.clone(),
         state.db.clone(),
+        state.clone(), // Pass state for status updates
         session_id.clone(),
         conversation,
     );
@@ -1707,10 +1832,17 @@ async fn send_message_sync(
     );
     debug!("📝 Message content: {}", request.message);
 
+    // Set processing status
+    set_agent_status(&state, &session_id, "sync", "processing");
+
     // Use shared message processing logic
     let (conversation, _user_message) = match process_user_message(&session_id, &request.message, &state).await {
         Ok(result) => result,
-        Err(error_response) => return error_response,
+        Err(error_response) => {
+            // Set error status
+            set_agent_status(&state, &session_id, "sync", "error");
+            return error_response;
+        }
     };
 
     // Process the message without streaming
@@ -1762,6 +1894,8 @@ async fn send_message_sync(
                     },
                     Err(e) => {
                         error!("❌ Agent processing error: {}", e);
+                        // Set error status
+                        set_agent_status(&state, &session_id, "sync", "error");
                         return (
                             StatusCode::INTERNAL_SERVER_ERROR,
                             Json(serde_json::json!({
@@ -1780,6 +1914,8 @@ async fn send_message_sync(
                 let assistant_message = GooseMessage::assistant().with_text(&assistant_content);
                 if let Err(e) = state.db.add_message(&session_id, &assistant_message).await {
                     error!("❌ Failed to save assistant message to MongoDB: {}", e);
+                    // Set error status
+                    set_agent_status(&state, &session_id, "sync", "error");
                     return (
                         StatusCode::INTERNAL_SERVER_ERROR,
                         Json(serde_json::json!({
@@ -1792,6 +1928,8 @@ async fn send_message_sync(
                 }
             }
 
+            // Set completed status
+            set_agent_status(&state, &session_id, "sync", "completed");
             info!("✅ [Fire-and-Forget] Processing completed for session: {}", session_id);
             
             (
@@ -1807,6 +1945,8 @@ async fn send_message_sync(
         }
         Err(e) => {
             error!("❌ Failed to start agent processing: {}", e);
+            // Set error status
+            set_agent_status(&state, &session_id, "sync", "error");
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(serde_json::json!({
@@ -1831,6 +1971,9 @@ async fn stream_direct_from_provider(
     );
     debug!("📝 Message content: {}", request.message);
 
+    // Set processing status
+    set_agent_status(&state, &session_id, "provider-streaming", "processing");
+
     // Verify session exists in MongoDB
     match state.db.get_session(&session_id).await {
         Ok(Some(_)) => {
@@ -1838,6 +1981,8 @@ async fn stream_direct_from_provider(
         }
         Ok(None) => {
             warn!("❌ Session not found in MongoDB: {}", session_id);
+            // Set error status
+            set_agent_status(&state, &session_id, "provider-streaming", "error");
             let error_data = serde_json::to_string(&TokenStreamEvent {
                 event_type: "error".to_string(),
                 content: "Session not found in MongoDB".to_string(),
@@ -1862,6 +2007,8 @@ async fn stream_direct_from_provider(
                 "❌ Failed to check session {} in MongoDB: {}",
                 session_id, error_msg
             );
+            // Set error status
+            set_agent_status(&state, &session_id, "provider-streaming", "error");
             let error_data = serde_json::to_string(&TokenStreamEvent {
                 event_type: "error".to_string(),
                 content: format!("MongoDB connection error: {}", error_msg),
@@ -1946,6 +2093,7 @@ async fn stream_direct_from_provider(
     let token_stream = create_provider_token_stream(
         state.provider.clone(),
         state.db.clone(),
+        state.clone(), // Pass state for status updates
         session_id.clone(),
         conversation,
     );
@@ -2007,10 +2155,11 @@ async fn export_session(
     }
 }
 
-// EXISTING: Agent-level event stream (unchanged)
+// EXISTING: Agent-level event stream with status tracking
 fn create_agent_stream(
     agent: Arc<Agent>,
     db: Arc<DatabaseManager>,
+    state: AppState,
     session_id: String,
     conversation: Conversation,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
@@ -2231,6 +2380,9 @@ fn create_agent_stream(
 
                 // Send completion event
                 info!("✅ [Agent-Level] Streaming completed for session: {}", session_id);
+                // Set completed status
+                set_agent_status(&state, &session_id, "agent-streaming", "completed");
+                
                 let event_data = StreamEvent {
                     event_type: "complete".to_string(),
                     content: serde_json::json!({
@@ -2246,6 +2398,9 @@ fn create_agent_stream(
             },
             Err(e) => {
                 error!("❌ Failed to start agent reply: {}", e);
+                
+                // Set error status
+                set_agent_status(&state, &session_id, "agent-streaming", "error");
 
                 let event_data = StreamEvent {
                     event_type: "error".to_string(),
@@ -2268,6 +2423,7 @@ fn create_agent_stream(
 fn create_provider_token_stream(
     provider: Arc<dyn Provider>,
     db: Arc<DatabaseManager>,
+    state: AppState,
     session_id: String,
     conversation: Conversation,
 ) -> impl futures::Stream<Item = Result<Event, Infallible>> {
@@ -2377,6 +2533,9 @@ fn create_provider_token_stream(
 
                 // Send completion event
                 info!("✅ [Provider-Level] Token streaming completed for session: {}", session_id);
+                // Set completed status
+                set_agent_status(&state, &session_id, "provider-streaming", "completed");
+                
                 let completion_event = TokenStreamEvent {
                     event_type: "complete".to_string(),
                     content: "Token streaming complete".to_string(),
@@ -2391,6 +2550,9 @@ fn create_provider_token_stream(
             },
             Err(e) => {
                 error!("❌ [Provider-Level] Failed to start provider streaming: {}", e);
+                
+                // Set error status
+                set_agent_status(&state, &session_id, "provider-streaming", "error");
 
                 let error_event = TokenStreamEvent {
                     event_type: "error".to_string(),
