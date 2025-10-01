@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::{convert::Infallible, net::SocketAddr, sync::{Arc, RwLock}, time::{SystemTime}, collections::HashMap};
 use tower_http::cors::{Any, CorsLayer};
 use tracing::{debug, error, info, warn};
+use futures::future::join_all;
 
 // Agent status structures
 #[derive(Debug, Clone, Serialize)]
@@ -273,20 +274,20 @@ pub async fn handle_api_server(
         .context("Failed to load extension configuration")?;
     let mut loaded_extensions = 0;
 
-    for ext_config in extensions {
-        if ext_config.enabled {
-            match agent.add_extension(ext_config.config.clone()).await {
-                Ok(_) => {
-                    loaded_extensions += 1;
-                    debug!("✅ Loaded extension: {}", ext_config.config.name());
-                }
-                Err(e) => {
-                    warn!(
-                        "⚠️ Failed to load extension {}: {}",
-                        ext_config.config.name(),
-                        e
-                    );
-                }
+    let futures = extensions.iter()
+        .filter(|ext_config| ext_config.enabled)
+        .map(|ext_config| agent.add_extension(ext_config.config.clone()));
+
+    let results = join_all(futures).await;
+
+    for (ext_config, result) in extensions.iter().filter(|e| e.enabled).zip(results) {
+        match result {
+            Ok(_) => {
+                loaded_extensions += 1;
+                debug!("✅ Loaded extension: {}", ext_config.config.name());
+            }
+            Err(e) => {
+                warn!("⚠️ Failed to load extension {}: {}", ext_config.config.name(), e);
             }
         }
     }
