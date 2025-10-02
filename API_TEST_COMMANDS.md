@@ -128,11 +128,21 @@ curl -X POST "$BASE/api/v1/sessions/invalid-session/messages" \
 # data: {"type": "complete", "content": {"message": "Response complete", "session_id": "550e8400-e29b-41d4-a716-446655440000", "storage": "mongodb"}}
 ```
 
-##### Test NEW provider-level token streaming - IN DEVELOPMENT
+##### Test provider-level token streaming
 
 ```bash
 # This one does not work yet
 curl -X POST "$BASE/api/v1/sessions/$SESSION_ID/stream" \
+  -H "Content-Type: application/json" \
+  -d '{"message": "Write a poem"}' \
+  --no-buffer
+```
+
+##### Test fire and forget message endpoint (NO ANSWER STREAMING)
+
+```bash
+# This one does not work yet
+curl -X POST "$BASE/api/v1/sessions/$SESSION_ID/send" \
   -H "Content-Type: application/json" \
   -d '{"message": "Write a poem"}' \
   --no-buffer
