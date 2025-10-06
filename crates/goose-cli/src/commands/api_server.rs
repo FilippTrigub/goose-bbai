@@ -404,18 +404,6 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
     // Test MongoDB connection
     let database_connected = state.db.health_check().await;
 
-    // Collect environment variables for debugging
-    let env_vars = serde_json::json!({
-        "GOOSE_PROVIDER": std::env::var("GOOSE_PROVIDER").unwrap_or("NOT_SET".to_string()),
-        "OPENAI_HOST": std::env::var("OPENAI_HOST").unwrap_or("NOT_SET".to_string()),
-        "OPENAI_BASE_PATH": std::env::var("OPENAI_BASE_PATH").unwrap_or("NOT_SET".to_string()),
-        "GOOSE_LEAD_MODEL": std::env::var("GOOSE_LEAD_MODEL").unwrap_or("NOT_SET".to_string()),
-        "GOOSE_AUTH_BYPASS": std::env::var("GOOSE_AUTH_BYPASS").unwrap_or("NOT_SET".to_string()),
-        "MONGODB_URL": std::env::var("MONGODB_URL").unwrap_or("NOT_SET".to_string()),
-        "MONGODB_DATABASE": std::env::var("MONGODB_DATABASE").unwrap_or("NOT_SET".to_string()),
-        "RUST_LOG": std::env::var("RUST_LOG").unwrap_or("NOT_SET".to_string())
-    });
-
     let response = serde_json::json!({
         "status": if database_connected { "ok" } else { "error" },
         "timestamp": timestamp.to_string(),
@@ -425,7 +413,6 @@ async fn health_check(State(state): State<AppState>) -> impl IntoResponse {
         "mongodb_url": state.db.connection_url.clone(),
         "mongodb_database": state.db.db_name.clone(),
         "streaming_modes": ["agent-events", "provider-tokens"],
-        "environment_variables": env_vars,
         "provider_streaming_support": state.provider.supports_streaming()
     });
 
