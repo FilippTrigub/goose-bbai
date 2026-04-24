@@ -1,47 +1,52 @@
-<div align="center">
+# goose-bbai
 
-# goose
+Goose, adapted into an API backend for [space-goose](https://github.com/FilippTrigub/space-goose).
 
-_a local, extensible, open source AI agent that automates engineering tasks_
+This repository is based on [aaif-goose/goose](https://github.com/aaif-goose/goose), but it is no longer just a local agent UI/CLI. The main change is that Goose now exposes a REST API so another app can drive sessions, messages, extensions, and settings remotely.
 
-<p align="center">
-  <a href="https://opensource.org/licenses/Apache-2.0">
-    <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg">
-  </a>
-  <a href="https://discord.gg/7GaTvbDwga">
-    <img src="https://img.shields.io/discord/1287729918100246654?logo=discord&logoColor=white&label=Join+Us&color=blueviolet" alt="Discord">
-  </a>
-  <a href="https://github.com/block/goose/actions/workflows/ci.yml">
-     <img src="https://img.shields.io/github/actions/workflow/status/block/goose/ci.yml?branch=main" alt="CI">
-  </a>
-</p>
-</div>
+## What changed from upstream Goose
 
-goose is your on-machine AI agent, capable of automating complex development tasks from start to finish. More than just code suggestions, goose can build entire projects from scratch, write and execute code, debug failures, orchestrate workflows, and interact with external APIs - _autonomously_.
+- Added `goose api-server` to run an Axum-based REST API.
+- Added session endpoints for creating, listing, exporting, deleting, and messaging conversations.
+- Added both agent-event streaming and provider-level token streaming.
+- Added MongoDB-backed persistence for sessions and session history.
+- Added endpoints for extension management, settings management, health checks, and agent status.
+- Added CORS defaults so a browser frontend can talk to the API.
 
-Whether you're prototyping an idea, refining existing code, or managing intricate engineering pipelines, goose adapts to your workflow and executes tasks with precision.
+## How it fits with space-goose
 
-Designed for maximum flexibility, goose works with any LLM and supports multi-model configuration to optimize performance and cost, seamlessly integrates with MCP servers, and is available as both a desktop app as well as CLI - making it the ultimate AI assistant for developers who want to move faster and focus on innovation.
+`space-goose` is the companion application that talks to this server.
+Instead of using Goose only as a local interactive agent, `space-goose` can treat it as a backend API and orchestrate conversations from another UI or workflow.
 
-[![Watch the video](https://github.com/user-attachments/assets/c477019c-570d-4cf9-9553-c274b79cb279)](https://youtu.be/D-DpDunrbpo)
+## API server
 
-# Quick Links
-- [Quickstart](https://block.github.io/goose/docs/quickstart)
-- [Installation](https://block.github.io/goose/docs/getting-started/installation)
-- [Tutorials](https://block.github.io/goose/docs/category/tutorials)
-- [Documentation](https://block.github.io/goose/docs/category/getting-started)
+Start the server with:
 
+```bash
+goose api-server --port 3000 --host 127.0.0.1 --database-url mongodb://localhost:27017
+```
 
-# A Little Goose Humor 🦢
+Notes:
 
-> Why did the developer choose goose as their AI agent?
-> 
-> Because it always helps them "migrate" their code to production! 🚀
+- `--database-url` is required, or you can set `MONGODB_URL`.
+- The database name comes from `MONGODB_DATABASE` and defaults to `goose_sessions`.
+- There is no local-storage fallback; this API server requires MongoDB.
+- Goose must already be configured/authenticated before the server starts.
 
-# Goose Around with Us
-- [Discord](https://discord.gg/block-opensource)
-- [YouTube](https://www.youtube.com/@goose-oss)
-- [LinkedIn](https://www.linkedin.com/company/goose-oss)
-- [Twitter/X](https://x.com/goose_oss)
-- [Bluesky](https://bsky.app/profile/opensource.block.xyz)
-- [Nostr](https://njump.me/opensource@block.xyz)
+## Available API areas
+
+- `GET /api/v1/health`
+- `GET /api/v1/agent/status`
+- `POST /api/v1/sessions`
+- `GET /api/v1/sessions`
+- `GET /api/v1/sessions/:id`
+- `POST /api/v1/sessions/:id/messages`
+- `POST /api/v1/sessions/:id/send`
+- `POST /api/v1/sessions/:id/stream`
+- `GET /api/v1/sessions/:id/export`
+- `GET /api/v1/extensions`
+- `GET /api/v1/settings`
+
+## Original project
+
+Upstream Goose: [block/goose](https://github.com/block/goose)
